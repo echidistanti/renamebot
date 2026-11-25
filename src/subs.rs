@@ -58,8 +58,9 @@ pub fn moviehash(path: &Path) -> Result<String, Error> {
     for off in [0, size - CH] {
         f.seek(SeekFrom::Start(off))?;
         f.read_exact(&mut buf)?;
-        for c in buf.chunks_exact(8) {
-            hash = hash.wrapping_add(u64::from_le_bytes(c.try_into().expect("blocchi da 8 byte")));
+        let (words, _) = buf.as_chunks::<8>();
+        for w in words {
+            hash = hash.wrapping_add(u64::from_le_bytes(*w));
         }
     }
     Ok(format!("{hash:016x}"))
