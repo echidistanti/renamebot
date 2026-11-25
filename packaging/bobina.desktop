@@ -1,0 +1,8 @@
+[Desktop Entry]
+Type=Application
+Name=Bobina
+Comment=Rinomina film e serie TV
+Exec=bobina
+Icon=bobina
+Categories=AudioVideo;Utility;
+Terminal=false
