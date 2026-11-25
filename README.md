@@ -28,7 +28,7 @@ Sotto Wayland nativo il trascinamento può non funzionare (limite della libreria
 ## Release
 
 La CI (`.github/workflows/ci.yml`) compila e lancia i test su Linux e Windows a ogni push su `main`.
-Un tag `vX.Y.Z` avvia `release.yml`, che crea una release in bozza con installer e zip per Windows e AppImage per Linux.
+`release.yml` crea una release in bozza con installer e zip per Windows e AppImage per Linux. Si avvia con un tag `vX.Y.Z` oppure a mano da Actions → Release → Run workflow, indicando la versione: in quel caso il tag nasce quando si pubblica la bozza.
 
 ## Sviluppo
 

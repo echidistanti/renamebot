@@ -1,9 +1,19 @@
-# Un tag vX.Y.Z crea una release in bozza con installer e zip per Windows e AppImage per Linux.
+# Crea una release in bozza con installer e zip per Windows e AppImage per Linux.
+# Si avvia con un tag vX.Y.Z oppure a mano da Actions indicando la versione;
+# nel secondo caso il tag nasce quando si pubblica la bozza.
 name: Release
 
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      version:
+        description: "Versione senza la v iniziale (es. 0.1.0)"
+        required: true
+
+env:
+  TAG: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
 
 permissions:
   contents: write
@@ -19,7 +29,7 @@ jobs:
       - name: Zip portabile e installer
         shell: pwsh
         run: |
-          $v = "${{ github.ref_name }}".TrimStart("v")
+          $v = "$env:TAG".TrimStart("v")
           New-Item -ItemType Directory -Force dist | Out-Null
           Compress-Archive -Path target\release\bobina.exe, LICENSE, README.md -DestinationPath "dist\Bobina-$v-windows-x64.zip"
           $iscc = "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe"
@@ -41,7 +51,7 @@ jobs:
       - run: cargo build --release
       - name: AppImage
         run: |
-          v="${GITHUB_REF_NAME#v}"
+          v="${TAG#v}"
           mkdir -p AppDir/usr/bin dist
           cp target/release/bobina AppDir/usr/bin/
           cp packaging/bobina.desktop assets/bobina.png AppDir/
@@ -64,5 +74,8 @@ jobs:
           merge-multiple: true
       - uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
+          target_commitish: ${{ github.sha }}
+          name: Bobina ${{ env.TAG }}
           draft: true
           files: dist/*
