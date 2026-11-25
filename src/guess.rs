@@ -59,11 +59,15 @@ pub fn guess(stem: &str) -> MediaInfo {
     info
 }
 
-fn clean_title(raw: &str) -> String {
-    let spaced: String = raw
-        .chars()
-        .map(|c| if c == '.' || c == '_' { ' ' } else { c })
-        .collect();
+/// Toglie i separatori dei nomi di file. I punti diventano spazi solo se il testo non ha già spazi,
+/// così `Blade.Runner` diventa `Blade Runner` e `Mr. Robot` resta com'è.
+pub(crate) fn clean_title(raw: &str) -> String {
+    let raw = raw.replace('_', " ");
+    let spaced = if raw.contains(' ') {
+        raw
+    } else {
+        raw.replace('.', " ")
+    };
     spaced
         .split_whitespace()
         .collect::<Vec<_>>()
@@ -111,6 +115,11 @@ mod tests {
         assert_eq!(i.n.as_deref(), Some("Twin Peaks"));
         assert_eq!(i.y, Some(1990));
         assert_eq!((i.s, i.e), (Some(1), Some(1)));
+    }
+
+    #[test]
+    fn punti_nei_titoli_con_spazi() {
+        assert_eq!(guess("Mr. Robot S01E01").n.as_deref(), Some("Mr. Robot"));
     }
 
     #[test]

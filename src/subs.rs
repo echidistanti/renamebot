@@ -3,89 +3,16 @@
 //! La ricerca funziona con la sola chiave API. Il download richiede anche account e password.
 
 use crate::config::Config;
-use crate::http::encode;
+use crate::error::Error;
+use crate::http::{Http, Method, encode};
 use crate::template::MediaInfo;
 use serde_json::Value;
 use std::fs::File;
-use std::io::{self, Read, Seek, SeekFrom};
+use std::io::{Read, Seek, SeekFrom};
 use std::path::{Path, PathBuf};
 use std::sync::Arc;
-use std::time::Duration;
 
 pub const BASE: &str = "https://api.opensubtitles.com/api/v1";
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Method {
-    Get,
-    Post,
-}
-
-/// Trasporto HTTP con intestazioni e corpo; nei test si sostituisce con uno finto.
-pub trait SubsHttp: Send + Sync {
-    fn send(
-        &self,
-        method: Method,
-        url: &str,
-        headers: &[(&str, &str)],
-        body: Option<&str>,
-    ) -> Result<Vec<u8>, String>;
-}
-
-pub struct UreqSubs {
-    agent: ureq::Agent,
-}
-
-impl Default for UreqSubs {
-    fn default() -> Self {
-        let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(30)))
-            .build()
-            .into();
-        Self { agent }
-    }
-}
-
-fn status_message(code: u16) -> String {
-    match code {
-        401 => "credenziali OpenSubtitles non valide".into(),
-        403 => "chiave API OpenSubtitles non valida".into(),
-        406 => "limite di download giornaliero raggiunto".into(),
-        429 => "troppe richieste a OpenSubtitles, riprova tra poco".into(),
-        c => format!("HTTP {c}"),
-    }
-}
-
-impl SubsHttp for UreqSubs {
-    fn send(
-        &self,
-        method: Method,
-        url: &str,
-        headers: &[(&str, &str)],
-        body: Option<&str>,
-    ) -> Result<Vec<u8>, String> {
-        let result = match method {
-            Method::Get => {
-                let mut r = self.agent.get(url);
-                for (k, v) in headers {
-                    r = r.header(*k, *v);
-                }
-                r.call()
-            }
-            Method::Post => {
-                let mut r = self.agent.post(url);
-                for (k, v) in headers {
-                    r = r.header(*k, *v);
-                }
-                r.send(body.unwrap_or(""))
-            }
-        };
-        let mut resp = result.map_err(|e| match e {
-            ureq::Error::StatusCode(c) => status_message(c),
-            other => other.to_string(),
-        })?;
-        resp.body_mut().read_to_vec().map_err(|e| e.to_string())
-    }
-}
 
 #[derive(Debug, Clone, PartialEq)]
 pub struct SubCandidate {
@@ -119,12 +46,12 @@ pub struct Session {
 }
 
 /// Hash di OpenSubtitles: dimensione più somma delle parole a 64 bit dei primi e ultimi 64 KiB.
-pub fn moviehash(path: &Path) -> io::Result<String> {
+pub fn moviehash(path: &Path) -> Result<String, Error> {
     const CH: u64 = 65536;
     let mut f = File::open(path)?;
     let size = f.metadata()?.len();
     if size < CH * 2 {
-        return Err(io::Error::other("file troppo piccolo per l'hash"));
+        return Err(Error::FileTooSmall);
     }
     let mut hash = size;
     let mut buf = vec![0u8; CH as usize];
@@ -138,8 +65,12 @@ pub fn moviehash(path: &Path) -> io::Result<String> {
     Ok(format!("{hash:016x}"))
 }
 
-pub fn parse_search(body: &[u8]) -> Result<Vec<SubCandidate>, String> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| format!("risposta non valida: {e}"))?;
+fn json(body: &[u8]) -> Result<Value, Error> {
+    serde_json::from_slice(body).map_err(|e| Error::BadResponse(e.to_string()))
+}
+
+pub fn parse_search(body: &[u8]) -> Result<Vec<SubCandidate>, Error> {
+    let v = json(body)?;
     Ok(v["data"]
         .as_array()
         .map(|a| a.as_slice())
@@ -161,9 +92,12 @@ pub fn parse_search(body: &[u8]) -> Result<Vec<SubCandidate>, String> {
         .collect())
 }
 
-pub fn parse_login(body: &[u8]) -> Result<Session, String> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| format!("risposta non valida: {e}"))?;
-    let token = v["token"].as_str().ok_or("login senza token")?.to_string();
+pub fn parse_login(body: &[u8]) -> Result<Session, Error> {
+    let v = json(body)?;
+    let token = v["token"]
+        .as_str()
+        .ok_or(Error::BadResponse("token".into()))?
+        .to_string();
     let base = match v["base_url"].as_str().filter(|b| !b.is_empty()) {
         Some(b) => format!(
             "https://{}/api/v1",
@@ -174,11 +108,11 @@ pub fn parse_login(body: &[u8]) -> Result<Session, String> {
     Ok(Session { token, base })
 }
 
-pub fn parse_download(body: &[u8]) -> Result<(String, String), String> {
-    let v: Value = serde_json::from_slice(body).map_err(|e| format!("risposta non valida: {e}"))?;
+pub fn parse_download(body: &[u8]) -> Result<(String, String), Error> {
+    let v = json(body)?;
     let link = v["link"]
         .as_str()
-        .ok_or("risposta senza link di download")?;
+        .ok_or(Error::BadResponse("link".into()))?;
     let name = v["file_name"].as_str().unwrap_or("sub.srt");
     Ok((link.to_string(), name.to_string()))
 }
@@ -200,14 +134,14 @@ pub fn subtitle_path(video: &Path, lang: &str, file_name: &str) -> PathBuf {
 }
 
 pub struct Client {
-    http: Arc<dyn SubsHttp>,
+    http: Arc<dyn Http>,
     api_key: String,
     username: String,
     password: String,
 }
 
 impl Client {
-    pub fn new(http: Arc<dyn SubsHttp>, cfg: &Config) -> Self {
+    pub fn new(http: Arc<dyn Http>, cfg: &Config) -> Self {
         Self {
             http,
             api_key: cfg.os_api_key.trim().to_string(),
@@ -216,12 +150,30 @@ impl Client {
         }
     }
 
-    fn api_key(&self) -> Result<&str, String> {
+    fn api_key(&self) -> Result<&str, Error> {
         if self.api_key.is_empty() {
-            Err("chiave OpenSubtitles mancante: inseriscila nelle impostazioni".into())
+            Err(Error::OsKeyMissing)
         } else {
             Ok(&self.api_key)
         }
+    }
+
+    /// Richiesta all'API con i codici d'errore di OpenSubtitles tradotti.
+    fn call(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, Error> {
+        self.http
+            .send(method, url, headers, body)
+            .map_err(|e| match e {
+                Error::Http(401) => Error::OsLoginFailed,
+                Error::Http(403) => Error::OsKeyInvalid,
+                Error::Http(406) => Error::OsDailyLimit,
+                other => other,
+            })
     }
 
     fn user_agent() -> String {
@@ -234,7 +186,7 @@ impl Client {
         info: &MediaInfo,
         hash: Option<&str>,
         lang: &str,
-    ) -> Result<Vec<SubCandidate>, String> {
+    ) -> Result<Vec<SubCandidate>, Error> {
         let key = self.api_key()?;
         let ua = Self::user_agent();
         let headers = [
@@ -265,7 +217,7 @@ impl Client {
             urls.push(format!("{BASE}/subtitles?{}", q.join("&")));
         }
         if urls.is_empty() {
-            return Err("niente da cercare: manca il titolo".into());
+            return Err(Error::NothingToSearch);
         }
 
         let mut all: Vec<SubCandidate> = Vec::new();
@@ -273,8 +225,7 @@ impl Client {
         let mut any_ok = false;
         for url in &urls {
             match self
-                .http
-                .send(Method::Get, url, &headers, None)
+                .call(Method::Get, url, &headers, None)
                 .and_then(|b| parse_search(&b))
             {
                 Ok(found) => {
@@ -290,7 +241,7 @@ impl Client {
             }
         }
         if !any_ok {
-            return Err(first_err.unwrap_or_default());
+            return Err(first_err.unwrap_or(Error::NoResults));
         }
         all.sort_by(|a, b| {
             b.hash_match
@@ -300,10 +251,10 @@ impl Client {
         Ok(all)
     }
 
-    pub fn login(&self) -> Result<Session, String> {
+    pub fn login(&self) -> Result<Session, Error> {
         let key = self.api_key()?;
         if self.username.is_empty() || self.password.is_empty() {
-            return Err("account OpenSubtitles mancante: serve per scaricare".into());
+            return Err(Error::OsAccountMissing);
         }
         let ua = Self::user_agent();
         let headers = [
@@ -314,7 +265,7 @@ impl Client {
         ];
         let body =
             serde_json::json!({"username": self.username, "password": self.password}).to_string();
-        let resp = self.http.send(
+        let resp = self.call(
             Method::Post,
             &format!("{BASE}/login"),
             &headers,
@@ -324,7 +275,7 @@ impl Client {
     }
 
     /// Scarica un sottotitolo. Ritorna i byte così come sono, senza ricodificarli, e il nome del file.
-    pub fn download(&self, session: &Session, file_id: u64) -> Result<(Vec<u8>, String), String> {
+    pub fn download(&self, session: &Session, file_id: u64) -> Result<(Vec<u8>, String), Error> {
         let key = self.api_key()?;
         let ua = Self::user_agent();
         let auth = format!("Bearer {}", session.token);
@@ -336,7 +287,7 @@ impl Client {
             ("Accept", "application/json"),
         ];
         let body = serde_json::json!({"file_id": file_id}).to_string();
-        let resp = self.http.send(
+        let resp = self.call(
             Method::Post,
             &format!("{}/download", session.base),
             &headers,
@@ -359,25 +310,25 @@ mod tests {
     type Call = (Method, String, Vec<(String, String)>, Option<String>);
 
     struct Fake {
-        replies: HashMap<String, Result<&'static str, String>>,
+        replies: HashMap<String, Result<&'static str, Error>>,
         calls: Mutex<Vec<Call>>,
     }
     impl Fake {
-        fn new(pairs: Vec<(&str, Result<&'static str, String>)>) -> Arc<Self> {
+        fn new(pairs: Vec<(&str, Result<&'static str, Error>)>) -> Arc<Self> {
             Arc::new(Self {
                 replies: pairs.into_iter().map(|(k, v)| (k.to_string(), v)).collect(),
                 calls: Mutex::new(Vec::new()),
             })
         }
     }
-    impl SubsHttp for Fake {
+    impl Http for Fake {
         fn send(
             &self,
             method: Method,
             url: &str,
             headers: &[(&str, &str)],
             body: Option<&str>,
-        ) -> Result<Vec<u8>, String> {
+        ) -> Result<Vec<u8>, Error> {
             self.calls.lock().unwrap().push((
                 method,
                 url.into(),
@@ -390,7 +341,7 @@ mod tests {
             match self.replies.get(url) {
                 Some(Ok(b)) => Ok(b.as_bytes().to_vec()),
                 Some(Err(e)) => Err(e.clone()),
-                None => Err(format!("URL inatteso: {url}")),
+                None => Err(Error::Http(404)),
             }
         }
     }
@@ -489,7 +440,7 @@ mod tests {
         let name_url = format!("{BASE}/subtitles?languages=en&query=blade%20runner&year=1982");
         let hash_url = format!("{BASE}/subtitles?languages=en&moviehash=ff");
         let http = Fake::new(vec![
-            (&hash_url, Err("HTTP 500".into())),
+            (&hash_url, Err(Error::Http(500))),
             (&name_url, Ok(SEARCH_NAME)),
         ]);
         let client = Client::new(http, &cfg());
@@ -501,13 +452,13 @@ mod tests {
         assert_eq!(client.search(&info, Some("ff"), "en").unwrap().len(), 2);
 
         let solo_err = Fake::new(vec![
-            (&hash_url, Err("HTTP 500".into())),
-            (&name_url, Err("HTTP 500".into())),
+            (&hash_url, Err(Error::Http(500))),
+            (&name_url, Err(Error::Http(500))),
         ]);
         let client = Client::new(solo_err, &cfg());
         assert_eq!(
             client.search(&info, Some("ff"), "en").unwrap_err(),
-            "HTTP 500"
+            Error::Http(500)
         );
     }
 
@@ -519,27 +470,38 @@ mod tests {
             n: Some("x".into()),
             ..Default::default()
         };
-        assert!(
-            client
-                .search(&info, None, "it")
-                .unwrap_err()
-                .contains("chiave")
+        assert_eq!(
+            client.search(&info, None, "it").unwrap_err(),
+            Error::OsKeyMissing
         );
         let no_user = Config {
             os_api_key: "K".into(),
             ..Default::default()
         };
-        assert!(
-            Client::new(http, &no_user)
-                .login()
-                .unwrap_err()
-                .contains("account")
+        assert_eq!(
+            Client::new(http, &no_user).login().unwrap_err(),
+            Error::OsAccountMissing
         );
         assert!(
             Client::new(Fake::new(vec![]), &cfg())
                 .search(&MediaInfo::default(), None, "it")
                 .is_err()
         );
+    }
+
+    #[test]
+    fn codici_di_errore_di_opensubtitles() {
+        let http = Fake::new(vec![
+            (&format!("{BASE}/login"), Err(Error::Http(401))),
+            (&format!("{BASE}/download"), Err(Error::Http(406))),
+        ]);
+        let client = Client::new(http, &cfg());
+        assert_eq!(client.login().unwrap_err(), Error::OsLoginFailed);
+        let s = Session {
+            token: "T".into(),
+            base: BASE.into(),
+        };
+        assert_eq!(client.download(&s, 1).unwrap_err(), Error::OsDailyLimit);
     }
 
     #[test]

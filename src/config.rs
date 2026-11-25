@@ -1,10 +1,44 @@
 //! Impostazioni dell'utente, in `config.json` nella cartella dati.
 //! Le chiavi API stanno in chiaro nel file, con permessi ristretti dove il sistema li supporta.
 
+use crate::fsx::write_atomic;
+use crate::i18n::Lang;
 use serde::{Deserialize, Serialize};
 use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
+
+/// Coppia di formati con un nome: quelli integrati più quelli salvati dall'utente.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct Preset {
+    pub name: String,
+    pub episode: String,
+    pub movie: String,
+}
+
+const MOVIE: &str = "Movies/{n}{y|prefix: (|suffix:)}/{n}{y|prefix: (|suffix:)}";
+
+pub fn builtin_presets() -> Vec<Preset> {
+    let p = |name: &str, episode: &str| Preset {
+        name: name.into(),
+        episode: episode.into(),
+        movie: MOVIE.into(),
+    };
+    vec![
+        p(
+            "Plex",
+            "TV Shows/{n}{y|prefix: (|suffix:)}/Season {s00}/{n} - {s00e00}{t|prefix: - }",
+        ),
+        p(
+            "Jellyfin",
+            "Shows/{n}{y|prefix: (|suffix:)}/Season {s}/{n} S{s00}E{e00}{t|prefix: - }",
+        ),
+        p(
+            "Kodi",
+            "TV Shows/{n}/Season {s}/{n} - {s00e00}{t|prefix: - }",
+        ),
+    ]
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize, Default)]
 pub enum Provider {
@@ -35,6 +69,13 @@ pub struct Config {
     pub os_api_key: String,
     pub os_username: String,
     pub os_password: String,
+    /// Stato dell'interfaccia, ripreso al riavvio.
+    pub ui_lang: Lang,
+    pub mask: String,
+    pub fmt_episode: String,
+    pub fmt_movie: String,
+    pub dest: String,
+    pub presets: Vec<Preset>,
 }
 
 impl Default for Config {
@@ -46,6 +87,12 @@ impl Default for Config {
             os_api_key: String::new(),
             os_username: String::new(),
             os_password: String::new(),
+            ui_lang: Lang::It,
+            mask: String::new(),
+            fmt_episode: builtin_presets()[0].episode.clone(),
+            fmt_movie: builtin_presets()[0].movie.clone(),
+            dest: String::new(),
+            presets: Vec::new(),
         }
     }
 }
@@ -62,20 +109,18 @@ impl Config {
             .unwrap_or_default()
     }
 
+    /// Scrittura atomica; il file nasce leggibile solo dall'utente perché contiene le chiavi.
     pub fn save(&self, path: &Path) -> io::Result<()> {
-        if let Some(p) = path.parent() {
-            fs::create_dir_all(p)?;
+        let json = serde_json::to_vec_pretty(self).map_err(io::Error::other)?;
+        write_atomic(path, &json, true)
+    }
+
+    /// Salva un preset personale; uno con lo stesso nome viene sostituito.
+    pub fn upsert_preset(&mut self, preset: Preset) {
+        match self.presets.iter_mut().find(|p| p.name == preset.name) {
+            Some(p) => *p = preset,
+            None => self.presets.push(preset),
         }
-        fs::write(
-            path,
-            serde_json::to_string_pretty(self).map_err(io::Error::other)?,
-        )?;
-        #[cfg(unix)]
-        {
-            use std::os::unix::fs::PermissionsExt;
-            fs::set_permissions(path, fs::Permissions::from_mode(0o600))?;
-        }
-        Ok(())
     }
 
     /// Codice lingua nel formato richiesto da TMDB ("it-IT").
@@ -107,11 +152,30 @@ mod tests {
         assert_eq!(Config::load(&p), c);
         assert_eq!(c.tmdb_lang(), "en-US");
 
-        fs::write(&p, r#"{"tmdb_key":"x"}"#).unwrap();
+        fs::write(&p, r#"{"tmdb_key":"x","ui_lang":"en"}"#).unwrap();
         let l = Config::load(&p);
         assert_eq!(l.tmdb_key, "x");
         assert_eq!(l.meta_lang, "it");
+        assert_eq!(l.ui_lang, Lang::En);
+        assert_eq!(
+            l.fmt_episode,
+            builtin_presets()[0].episode,
+            "formato mancante: quello di Plex"
+        );
         assert_eq!(Config::load(&d.path().join("no.json")), Config::default());
+    }
+
+    #[test]
+    fn preset_personali() {
+        let mut c = Config::default();
+        let p = |e: &str| Preset {
+            name: "Mio".into(),
+            episode: e.into(),
+            movie: "{n}".into(),
+        };
+        c.upsert_preset(p("{n} {s00e00}"));
+        c.upsert_preset(p("{n} {sxe}"));
+        assert_eq!(c.presets, vec![p("{n} {sxe}")]);
     }
 
     #[cfg(unix)]

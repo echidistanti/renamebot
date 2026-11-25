@@ -1,22 +1,43 @@
-//! Accesso alla rete con cache su disco. Il trait `Fetch` permette di sostituire la rete nei test.
+//! Accesso alla rete. Un solo trait per tutti i servizi; la cache su disco avvolge le GET semplici.
 
+use crate::error::Error;
+use crate::fsx::write_atomic;
 use std::fs;
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime};
 
-pub trait Fetch: Send + Sync {
-    fn get(&self, url: &str) -> Result<String, String>;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Method {
+    Get,
+    Post,
+}
+
+/// Trasporto HTTP; nei test si sostituisce con uno finto.
+pub trait Http: Send + Sync {
+    fn send(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, Error>;
+
+    /// GET senza intestazioni, con il corpo come testo.
+    fn get(&self, url: &str) -> Result<String, Error> {
+        let bytes = self.send(Method::Get, url, &[], None)?;
+        String::from_utf8(bytes).map_err(|e| Error::BadResponse(e.to_string()))
+    }
 }
 
 /// Client HTTP reale.
-pub struct Http {
+pub struct Ureq {
     agent: ureq::Agent,
 }
 
-impl Default for Http {
+impl Default for Ureq {
     fn default() -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
-            .timeout_global(Some(Duration::from_secs(15)))
+            .timeout_global(Some(Duration::from_secs(30)))
             .user_agent(concat!("Bobina/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
@@ -24,25 +45,49 @@ impl Default for Http {
     }
 }
 
-impl Fetch for Http {
-    fn get(&self, url: &str) -> Result<String, String> {
-        let mut resp = self.agent.get(url).call().map_err(|e| match e {
-            ureq::Error::StatusCode(code) => format!("HTTP {code}"),
-            other => other.to_string(),
+impl Http for Ureq {
+    fn send(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, Error> {
+        let result = match method {
+            Method::Get => {
+                let mut r = self.agent.get(url);
+                for (k, v) in headers {
+                    r = r.header(*k, *v);
+                }
+                r.call()
+            }
+            Method::Post => {
+                let mut r = self.agent.post(url);
+                for (k, v) in headers {
+                    r = r.header(*k, *v);
+                }
+                r.send(body.unwrap_or(""))
+            }
+        };
+        let mut resp = result.map_err(|e| match e {
+            ureq::Error::StatusCode(code) => Error::Http(code),
+            other => Error::Network(other.to_string()),
         })?;
-        resp.body_mut().read_to_string().map_err(|e| e.to_string())
+        resp.body_mut()
+            .read_to_vec()
+            .map_err(|e| Error::Network(e.to_string()))
     }
 }
 
-/// Aggiunge una cache su disco a un altro `Fetch`. La chiave della cache non contiene `api_key`.
-pub struct Cached<F: Fetch> {
-    inner: F,
+/// Cache su disco per le GET senza intestazioni. La chiave della cache non contiene `api_key`.
+pub struct Cached<H: Http> {
+    inner: H,
     dir: PathBuf,
     ttl: Duration,
 }
 
-impl<F: Fetch> Cached<F> {
-    pub fn new(inner: F, dir: PathBuf, ttl: Duration) -> Self {
+impl<H: Http> Cached<H> {
+    pub fn new(inner: H, dir: PathBuf, ttl: Duration) -> Self {
         Self { inner, dir, ttl }
     }
 
@@ -57,21 +102,30 @@ impl<F: Fetch> Cached<F> {
     }
 }
 
-impl<F: Fetch> Fetch for Cached<F> {
-    fn get(&self, url: &str) -> Result<String, String> {
+impl<H: Http> Http for Cached<H> {
+    fn send(
+        &self,
+        method: Method,
+        url: &str,
+        headers: &[(&str, &str)],
+        body: Option<&str>,
+    ) -> Result<Vec<u8>, Error> {
+        if method != Method::Get || !headers.is_empty() {
+            return self.inner.send(method, url, headers, body);
+        }
         let path = self.path_for(url);
         let fresh = fs::metadata(&path)
             .and_then(|m| m.modified())
             .ok()
             .and_then(|t| SystemTime::now().duration_since(t).ok())
             .is_some_and(|age| age < self.ttl);
-        if fresh && let Ok(body) = fs::read_to_string(&path) {
-            return Ok(body);
+        if fresh && let Ok(bytes) = fs::read(&path) {
+            return Ok(bytes);
         }
-        let body = self.inner.get(url)?;
+        let bytes = self.inner.send(method, url, headers, body)?;
         // Un errore di scrittura nella cache non deve far fallire la richiesta.
-        let _ = fs::create_dir_all(&self.dir).and_then(|_| fs::write(&path, &body));
-        Ok(body)
+        let _ = write_atomic(&path, &bytes, false);
+        Ok(bytes)
     }
 }
 
@@ -120,21 +174,27 @@ mod tests {
     use std::sync::atomic::{AtomicUsize, Ordering};
 
     struct Fake(AtomicUsize);
-    impl Fetch for Fake {
-        fn get(&self, url: &str) -> Result<String, String> {
+    impl Http for Fake {
+        fn send(
+            &self,
+            _m: Method,
+            url: &str,
+            _h: &[(&str, &str)],
+            _b: Option<&str>,
+        ) -> Result<Vec<u8>, Error> {
             self.0.fetch_add(1, Ordering::SeqCst);
-            Ok(format!("risposta per {url}"))
+            Ok(format!("risposta per {url}").into_bytes())
         }
+    }
+
+    fn cached(ttl: Duration, dir: &std::path::Path) -> Cached<Fake> {
+        Cached::new(Fake(AtomicUsize::new(0)), dir.into(), ttl)
     }
 
     #[test]
     fn la_cache_evita_la_seconda_richiesta() {
         let d = tempfile::tempdir().unwrap();
-        let c = Cached::new(
-            Fake(AtomicUsize::new(0)),
-            d.path().into(),
-            Duration::from_secs(60),
-        );
+        let c = cached(Duration::from_secs(60), d.path());
         let a = c.get("https://x.test/search?api_key=SEGRETO&q=a").unwrap();
         let b = c.get("https://x.test/search?api_key=ALTRA&q=a").unwrap();
         assert_eq!(a, b, "la chiave API non entra nella cache");
@@ -144,12 +204,21 @@ mod tests {
     }
 
     #[test]
-    fn cache_scaduta_richiede_di_nuovo() {
+    fn cache_scaduta_o_richieste_con_intestazioni_vanno_in_rete() {
         let d = tempfile::tempdir().unwrap();
-        let c = Cached::new(Fake(AtomicUsize::new(0)), d.path().into(), Duration::ZERO);
+        let c = cached(Duration::ZERO, d.path());
         c.get("https://x.test/a").unwrap();
         c.get("https://x.test/a").unwrap();
         assert_eq!(c.inner.0.load(Ordering::SeqCst), 2);
+
+        let c = cached(Duration::from_secs(60), d.path());
+        for _ in 0..2 {
+            c.send(Method::Get, "https://x.test/h", &[("Api-Key", "k")], None)
+                .unwrap();
+            c.send(Method::Post, "https://x.test/p", &[], Some("{}"))
+                .unwrap();
+        }
+        assert_eq!(c.inner.0.load(Ordering::SeqCst), 4);
     }
 
     #[test]

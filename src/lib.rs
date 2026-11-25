@@ -1,4 +1,6 @@
 pub mod config;
+pub mod error;
+pub mod fsx;
 pub mod guess;
 pub mod http;
 pub mod i18n;

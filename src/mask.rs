@@ -4,9 +4,10 @@
 //! Segnaposto: n, t (testo), y (anno a 4 cifre), s, e (numeri). `*` ignora qualsiasi testo.
 //! La maschera confronta il nome senza estensione, ignorando le maiuscole.
 
+use crate::guess::clean_title;
+use crate::i18n::{Lang, tr};
 use crate::template::MediaInfo;
 use regex::Regex;
-use std::fmt;
 
 #[derive(Debug, Clone, PartialEq)]
 pub enum MaskError {
@@ -15,12 +16,12 @@ pub enum MaskError {
     Duplicate(String),
 }
 
-impl fmt::Display for MaskError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl MaskError {
+    pub fn localized(&self, l: Lang) -> String {
         match self {
-            Self::Unclosed => write!(f, "graffa non chiusa"),
-            Self::UnknownPlaceholder(p) => write!(f, "segnaposto non valido nella maschera: {p}"),
-            Self::Duplicate(p) => write!(f, "segnaposto ripetuto: {p}"),
+            Self::Unclosed => tr(l, "err_unclosed").into(),
+            Self::UnknownPlaceholder(p) => format!("{}: {p}", tr(l, "err_mask_placeholder")),
+            Self::Duplicate(p) => format!("{}: {p}", tr(l, "err_duplicate_placeholder")),
         }
     }
 }
@@ -72,7 +73,12 @@ impl Mask {
     /// Estrae i campi dal nome (senza estensione). `None` se la maschera non corrisponde.
     pub fn extract(&self, stem: &str) -> Option<MediaInfo> {
         let caps = self.re.captures(stem)?;
-        let text = |k: &str| caps.name(k).map(|m| m.as_str().trim().to_string());
+        // Stessa pulizia del riconoscimento automatico: `Blade.Runner` diventa `Blade Runner`.
+        let text = |k: &str| {
+            caps.name(k)
+                .map(|m| clean_title(m.as_str()))
+                .filter(|v| !v.is_empty())
+        };
         let num = |k: &str| caps.name(k).and_then(|m| m.as_str().parse::<u32>().ok());
         Some(MediaInfo {
             n: text("n"),
@@ -101,8 +107,21 @@ mod tests {
     fn asterisco_ignora_il_resto() {
         let m = Mask::compile("{n}.{y}.*").unwrap();
         let i = m.extract("Blade.Runner.1982.1080p.BluRay.x264").unwrap();
-        assert_eq!(i.n.as_deref(), Some("Blade.Runner"));
+        assert_eq!(i.n.as_deref(), Some("Blade Runner"));
         assert_eq!(i.y, Some(1982));
+    }
+
+    #[test]
+    fn i_punti_restano_se_il_titolo_ha_gia_spazi() {
+        let m = Mask::compile("{n} - S{s}E{e}").unwrap();
+        assert_eq!(
+            m.extract("Mr. Robot - S01E01").unwrap().n.as_deref(),
+            Some("Mr. Robot")
+        );
+        assert_eq!(
+            m.extract("the_wire - S03E05").unwrap().n.as_deref(),
+            Some("the wire")
+        );
     }
 
     #[test]

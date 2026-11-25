@@ -5,7 +5,7 @@
 //! Prefix e suffix si applicano solo se il valore esiste e rendono il campo opzionale.
 //! `{{` e `}}` producono le graffe letterali. Lo `/` nel template separa le cartelle.
 
-use std::fmt;
+use crate::i18n::{Lang, tr};
 
 /// Dati noti su un file multimediale.
 #[derive(Debug, Clone, Default, PartialEq)]
@@ -49,13 +49,13 @@ pub enum TemplateError {
     EmptyExpression,
 }
 
-impl fmt::Display for TemplateError {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+impl TemplateError {
+    pub fn localized(&self, l: Lang) -> String {
         match self {
-            Self::Unclosed => write!(f, "graffa non chiusa"),
-            Self::UnknownPlaceholder(p) => write!(f, "segnaposto sconosciuto: {p}"),
-            Self::UnknownFilter(p) => write!(f, "filtro sconosciuto: {p}"),
-            Self::EmptyExpression => write!(f, "espressione vuota"),
+            Self::Unclosed => tr(l, "err_unclosed").into(),
+            Self::UnknownPlaceholder(p) => format!("{}: {p}", tr(l, "err_unknown_placeholder")),
+            Self::UnknownFilter(p) => format!("{}: {p}", tr(l, "err_unknown_filter")),
+            Self::EmptyExpression => tr(l, "err_empty_expression").into(),
         }
     }
 }

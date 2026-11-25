@@ -2,6 +2,7 @@
 
 use crate::guess::guess;
 use crate::mask::Mask;
+use crate::ops::is_case_rename;
 use crate::template::{MediaInfo, Template};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
@@ -38,24 +39,18 @@ pub struct Formats<'a> {
     pub movie: &'a Template,
 }
 
-/// Calcola il piano. Con `mask` i dati vengono dal nome attuale, senza maschera dal riconoscimento automatico.
-pub fn build_plan(
-    files: &[PathBuf],
-    mask: Option<&Mask>,
-    formats: &Formats,
-    dest_root: Option<&Path>,
-) -> Vec<PlanItem> {
-    build_plan_with(files, formats, dest_root, &|p| {
-        let stem = p.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        match mask {
-            Some(m) => m.extract(stem),
-            None => Some(guess(stem)),
-        }
-    })
+/// Dati di un file dal suo nome: con `mask` dalla maschera, senza dal riconoscimento automatico.
+/// `None` se la maschera non corrisponde.
+pub fn info_from_name(mask: Option<&Mask>, path: &Path) -> Option<MediaInfo> {
+    let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
+    match mask {
+        Some(m) => m.extract(stem),
+        None => Some(guess(stem)),
+    }
 }
 
-/// Come `build_plan`, ma i dati di ogni file arrivano da `info_for` (`None` = non riconosciuto).
-pub fn build_plan_with(
+/// Calcola il piano. I dati di ogni file arrivano da `info_for` (`None` = non riconosciuto).
+pub fn build_plan(
     files: &[PathBuf],
     formats: &Formats,
     dest_root: Option<&Path>,
@@ -129,7 +124,7 @@ fn plan_one(
 
     let status = if target == source {
         Status::Unchanged
-    } else if target.exists() {
+    } else if target.exists() && !is_case_rename(source, &target) {
         Status::Exists
     } else {
         Status::Ok
@@ -153,6 +148,15 @@ mod tests {
         )
     }
 
+    fn bp(
+        files: &[PathBuf],
+        mask: Option<&Mask>,
+        f: &Formats,
+        dest: Option<&Path>,
+    ) -> Vec<PlanItem> {
+        build_plan(files, f, dest, &|p| info_from_name(mask, p))
+    }
+
     fn touch(dir: &Path, name: &str) -> PathBuf {
         let p = dir.join(name);
         fs::write(&p, b"").unwrap();
@@ -165,7 +169,7 @@ mod tests {
         let a = touch(d.path(), "twin.peaks.s01e02.mkv");
         let b = touch(d.path(), "Blade.Runner.1982.1080p.mp4");
         let (e, m) = fmts();
-        let plan = build_plan(
+        let plan = bp(
             &[a, b],
             None,
             &Formats {
@@ -193,7 +197,7 @@ mod tests {
         let b = touch(d.path(), "Stalker.1979.mkv");
         let c = touch(d.path(), "Stalker.1979.1080p.mkv");
         let (e, m) = fmts();
-        let plan = build_plan(
+        let plan = bp(
             &[a, b, c],
             None,
             &Formats {
@@ -213,7 +217,7 @@ mod tests {
         let a = touch(d.path(), "qualcosa.mkv");
         let (e, m) = fmts();
         let mask = Mask::compile("{n} - S{s}E{e}").unwrap();
-        let plan = build_plan(
+        let plan = bp(
             std::slice::from_ref(&a),
             Some(&mask),
             &Formats {
@@ -225,7 +229,7 @@ mod tests {
         assert_eq!(plan[0].status, Status::NoMatch);
 
         let solo_e = Template::parse("{t}").unwrap();
-        let plan = build_plan(
+        let plan = bp(
             &[a],
             None,
             &Formats {
@@ -246,15 +250,38 @@ mod tests {
             episode: &e,
             movie: &m,
         };
-        let plan = build_plan(std::slice::from_ref(&a), None, &f, None);
+        let plan = bp(std::slice::from_ref(&a), None, &f, None);
         assert_eq!(plan[0].status, Status::Unchanged);
 
         let out = d.path().join("out");
-        let plan = build_plan(&[a], None, &f, Some(&out));
+        let plan = bp(&[a], None, &f, Some(&out));
         assert_eq!(
             plan[0].target.as_ref().unwrap(),
             &out.join("Solaris (1972).mkv")
         );
         assert_eq!(plan[0].status, Status::Ok);
+    }
+
+    #[test]
+    fn cambiare_solo_le_maiuscole_e_permesso() {
+        // Su Windows e macOS il nome nuovo "esiste" perché è lo stesso file: non è un conflitto.
+        let d = tempfile::tempdir().unwrap();
+        let a = touch(d.path(), "solaris (1972).mkv");
+        let (e, _) = fmts();
+        let m = Template::parse("Solaris (1972)").unwrap();
+        let f = Formats {
+            episode: &e,
+            movie: &m,
+        };
+        assert_eq!(
+            bp(std::slice::from_ref(&a), None, &f, None)[0].status,
+            Status::Ok
+        );
+
+        // Dove le maiuscole contano, un secondo file con quel nome è un conflitto vero.
+        if cfg!(target_os = "linux") {
+            touch(d.path(), "Solaris (1972).mkv");
+            assert_eq!(bp(&[a], None, &f, None)[0].status, Status::Exists);
+        }
     }
 }

@@ -11,18 +11,19 @@ Scheletro funzionante:
 - Maschere a segnaposto sul nome attuale: `{n} - S{s}E{e} - *`
 - Riconoscimento automatico di titolo, anno, stagione ed episodio dal nome file
 - Anteprima con rilevamento di conflitti (esiste già, duplicato, campi mancanti)
-- Applica (sposta/rinomina o copia), file collegati (`.srt`, `.ass`, `.nfo`…) che seguono il video, mai sovrascritture
-- Annulla persistente (registro in `history.json` nella cartella dati utente), ultimi 50 lotti
+- Applica (sposta/rinomina o copia) in background con barra di avanzamento; file collegati (`.srt`, `.ass`, `.nfo`…, con etichette di lingua come `.it` o `.pt-BR.forced`) che seguono il video; mai sovrascritture; su Windows e macOS si possono cambiare anche solo le maiuscole
+- Annulla persistente (registro in `history.json` nella cartella dati utente, salvato durante il lavoro e condiviso tra più finestre), ultimi 50 lotti
 - Riconoscimento online (TMDB per film e serie, TVmaze per serie): ricerca per gruppo di file, miglior candidato scelto anche per anno, elenco per cambiare scelta, titoli degli episodi; cache su disco di 7 giorni
-- Impostazioni (chiave TMDB, database, lingua dei metadati) in `config.json` nella cartella dati utente
+- Impostazioni in `config.json` nella cartella dati utente: chiavi, database, lingua dei metadati, lingua dell'interfaccia, maschera, formati, destinazione e preset personali, ripresi al riavvio
 - Sottotitoli da OpenSubtitles.com: ricerca per hash del file e per nome nella lingua scelta, anteprima dei candidati (release, scaricamenti, corrispondenza hash), download accanto al video come `Nome.<lingua>.srt`, mai sovrascrivere. Servono chiave API, account e password nelle impostazioni
-- Preset Plex, Jellyfin, Kodi; interfaccia in italiano e inglese; drag and drop
+- Preset Plex, Jellyfin, Kodi più preset personali; interfaccia ed errori in italiano e inglese; drag and drop
 
 I client TMDB, TVmaze e OpenSubtitles sono testati su risposte registrate e vanno ancora provati dal vivo con le chiavi.
 
 ## Linux
 
 I dialoghi «Aggiungi file/cartella» usano xdg-desktop-portal: su desktop senza portale resta il trascinamento.
+Sotto Wayland nativo il trascinamento può non funzionare (limite della libreria delle finestre): in quel caso usa i pulsanti.
 
 ## Release
 
