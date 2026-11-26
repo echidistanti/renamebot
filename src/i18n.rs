@@ -246,6 +246,15 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
             "The key is enough to search; username and password are needed to download.",
         ),
         "close" => ("Chiudi", "Close"),
+        "about" => ("Informazioni", "About"),
+        "about_text" => (
+            "Software libero con licenza MIT. Titoli e anni dei film e delle serie da TMDB e TVmaze, sottotitoli da OpenSubtitles.com.",
+            "Free software under the MIT licence. Film and series titles and years from TMDB and TVmaze, subtitles from OpenSubtitles.com.",
+        ),
+        "about_tvmaze" => (
+            "Dati delle serie da TVmaze (tvmaze.com), con licenza CC BY-SA 4.0.",
+            "Series data from TVmaze (tvmaze.com), licensed CC BY-SA 4.0.",
+        ),
         "msg_history_not_saved" => ("registro non salvato", "history not saved"),
         "msg_settings_not_saved" => ("impostazioni non salvate", "settings not saved"),
         "err_tmdb_key_missing" => (

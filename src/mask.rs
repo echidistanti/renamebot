@@ -125,6 +125,22 @@ mod tests {
     }
 
     #[test]
+    fn esempi_del_readme() {
+        let m = Mask::compile("{n} {s}x{e}*").unwrap();
+        let i = m.extract("The Wire 3x05 720p").unwrap();
+        assert_eq!(
+            (i.n.as_deref(), i.s, i.e),
+            (Some("The Wire"), Some(3), Some(5))
+        );
+        let m = Mask::compile("{n} - S{s}E{e} - {t}").unwrap();
+        assert!(
+            m.extract("Twin Peaks - S02E07 - Lonely Souls")
+                .unwrap()
+                .is_episode()
+        );
+    }
+
+    #[test]
     fn nessuna_corrispondenza() {
         let m = Mask::compile("{n} - S{s}E{e}").unwrap();
         assert!(m.extract("file a caso").is_none());

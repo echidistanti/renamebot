@@ -12,8 +12,8 @@ DefaultDirName={autopf}\RenameBot
 DefaultGroupName=RenameBot
 OutputDir=..\dist
 OutputBaseFilename=RenameBot-{#AppVersion}-setup
-SetupIconFile=..\assets\renamebot.ico
-UninstallDisplayIcon={app}\renamebot.ico
+SetupIconFile=..\assets\icon.ico
+UninstallDisplayIcon={app}\icon.ico
 LicenseFile=..\LICENSE
 Compression=lzma2
 SolidCompression=yes
@@ -31,13 +31,13 @@ Name: "desktopicon"; Description: "{cm:CreateDesktopIcon}"; GroupDescription: "{
 
 [Files]
 Source: "..\target\release\renamebot.exe"; DestDir: "{app}"; Flags: ignoreversion
-Source: "..\assets\renamebot.ico"; DestDir: "{app}"; Flags: ignoreversion
+Source: "..\assets\icon.ico"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\LICENSE"; DestDir: "{app}"; Flags: ignoreversion
 Source: "..\README.md"; DestDir: "{app}"; Flags: ignoreversion
 
 [Icons]
-Name: "{group}\RenameBot"; Filename: "{app}\renamebot.exe"; IconFilename: "{app}\renamebot.ico"
-Name: "{autodesktop}\RenameBot"; Filename: "{app}\renamebot.exe"; IconFilename: "{app}\renamebot.ico"; Tasks: desktopicon
+Name: "{group}\RenameBot"; Filename: "{app}\renamebot.exe"; IconFilename: "{app}\icon.ico"
+Name: "{autodesktop}\RenameBot"; Filename: "{app}\renamebot.exe"; IconFilename: "{app}\icon.ico"; Tasks: desktopicon
 
 [Run]
 Filename: "{app}\renamebot.exe"; Description: "{cm:LaunchProgram,RenameBot}"; Flags: nowait postinstall skipifsilent

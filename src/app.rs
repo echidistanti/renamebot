@@ -1946,6 +1946,19 @@ impl App {
                                 );
                                 ui.end_row();
                             });
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        // Le attribuzioni che TMDB e TVmaze chiedono di mostrare nel programma.
+                        ui.label(RichText::new(format!("{} · RenameBot {}", tr(l, "about"), env!("CARGO_PKG_VERSION"))).strong());
+                        ui.add(egui::Label::new(muted(tr(l, "about_text")).size(12.0)).wrap());
+                        ui.add(
+                            egui::Label::new(
+                                muted("This product uses the TMDB API but is not endorsed or certified by TMDB.").size(12.0),
+                            )
+                            .wrap(),
+                        );
+                        ui.add(egui::Label::new(muted(tr(l, "about_tvmaze")).size(12.0)).wrap());
                         ui.add_space(14.0);
                         ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                             if ui::button(ui, tr(l, "save"), Kind::Primary).clicked() {

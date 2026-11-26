@@ -52,7 +52,8 @@ jobs:
           v="${TAG#v}"
           mkdir -p AppDir/usr/bin dist
           cp target/release/renamebot AppDir/usr/bin/
-          cp packaging/renamebot.desktop assets/renamebot.png AppDir/
+          cp packaging/renamebot.desktop AppDir/
+          cp assets/icon-256.png AppDir/renamebot.png
           ln -s usr/bin/renamebot AppDir/AppRun
           curl -fsSL -o appimagetool https://github.com/AppImage/appimagetool/releases/download/continuous/appimagetool-x86_64.AppImage
           chmod +x appimagetool

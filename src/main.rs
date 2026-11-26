@@ -14,7 +14,7 @@ fn main() -> eframe::Result {
         .with_drag_and_drop(true)
         // Su Wayland collega la finestra a renamebot.desktop, e quindi all'icona.
         .with_app_id("renamebot");
-    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/renamebot.png")) {
+    if let Ok(icon) = eframe::icon_data::from_png_bytes(include_bytes!("../assets/icon-256.png")) {
         viewport = viewport.with_icon(icon);
     }
     eframe::run_native(
