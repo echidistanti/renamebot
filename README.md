@@ -2,6 +2,8 @@
 
 *Fino alla versione 0.1.0 si chiamava Bobina.*
 
+![Anteprima della rinomina](docs/rinomina.png)
+
 Rinominatore di film e serie TV con anteprima, scritto in Rust con GUI nativa (egui).
 Windows e Linux subito, macOS in seguito. Riscrittura indipendente, ispirata al comportamento di FileBot Pro.
 
@@ -21,6 +23,12 @@ Scheletro funzionante:
 - Preset Plex, Jellyfin, Kodi più preset personali; interfaccia ed errori in italiano e inglese; drag and drop
 
 I client TMDB, TVmaze e OpenSubtitles sono testati su risposte registrate e vanno ancora provati dal vivo con le chiavi.
+
+## Opzioni
+
+Chiavi API, database delle serie e lingue stanno nel pannello Opzioni, in alto a destra.
+
+![Opzioni](docs/opzioni.png)
 
 ## Linux
 

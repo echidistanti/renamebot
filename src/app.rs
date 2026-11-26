@@ -1,7 +1,8 @@
 //! Finestra principale: elenco file, maschera, formati, anteprima della rinomina e sottotitoli.
 //! Il lavoro lento (rete, spostamenti di file) gira in thread separati che rispondono con `Msg`.
 
-use eframe::egui;
+use crate::ui::{self, Kind, muted};
+use eframe::egui::{self, Margin, RichText, Stroke};
 use renamebot::config::{Config, Preset, Provider, builtin_presets};
 use renamebot::error::Error;
 use renamebot::http::{Cached, Http, Ureq};
@@ -121,6 +122,12 @@ impl Notify {
     }
 }
 
+/// Esito dell'ultima operazione, mostrato sopra la barra in basso finché non lo si chiude.
+struct Notice {
+    text: String,
+    bad: bool,
+}
+
 enum Busy {
     Applying(usize, usize),
     Undoing,
@@ -130,15 +137,18 @@ pub struct App {
     config: Config,
     config_path: Option<PathBuf>,
     files: Vec<PathBuf>,
-    preset_name: String,
     plan: Vec<PlanItem>,
     plan_key: String,
-    error: Option<String>,
+    mask_error: Option<String>,
+    format_error: Option<String>,
+    show_options: bool,
+    /// Nome del preset da salvare, mentre lo si scrive.
+    save_as: Option<String>,
     action: Action,
     with_sidecars: bool,
     history: History,
     history_path: Option<PathBuf>,
-    message: Option<String>,
+    notice: Option<Notice>,
     busy: Option<Busy>,
     meta_http: Arc<dyn Http>,
     subs_http: Arc<dyn Http>,
@@ -154,7 +164,7 @@ pub struct App {
 }
 
 impl App {
-    pub fn new(cc: &eframe::CreationContext<'_>) -> Self {
+    pub fn new(cc: &eframe::CreationContext<'_>, open: Vec<PathBuf>) -> Self {
         let history_path = History::default_path();
         let history = history_path
             .as_deref()
@@ -166,19 +176,21 @@ impl App {
             .unwrap_or_else(|| std::env::temp_dir().join("renamebot-http"));
         let week = Duration::from_secs(7 * 24 * 3600);
         let (tx, rx) = channel();
-        Self {
+        let mut app = Self {
             config,
             config_path,
             files: Vec::new(),
-            preset_name: String::new(),
             plan: Vec::new(),
             plan_key: String::new(),
-            error: None,
+            mask_error: None,
+            format_error: None,
+            show_options: false,
+            save_as: None,
             action: Action::Move,
             with_sidecars: true,
             history,
             history_path,
-            message: None,
+            notice: None,
             busy: None,
             meta_http: Arc::new(Cached::new(Ureq::default(), cache_dir, week)),
             subs_http: Arc::new(Ureq::default()),
@@ -194,7 +206,11 @@ impl App {
             sub_lang: None,
             sub_rows: Vec::new(),
             session: Arc::new(Mutex::new(None)),
+        };
+        for p in open {
+            app.add_path(&p);
         }
+        app
     }
 
     fn lang(&self) -> Lang {
@@ -211,10 +227,10 @@ impl App {
         if let Some(p) = &self.config_path
             && let Err(e) = self.config.save(p)
         {
-            self.message = Some(format!(
-                "{}: {e}",
-                tr(self.lang(), "msg_settings_not_saved")
-            ));
+            self.notice = Some(Notice {
+                text: format!("{}: {e}", tr(self.lang(), "msg_settings_not_saved")),
+                bad: true,
+            });
         }
     }
 
@@ -277,7 +293,8 @@ impl App {
             return;
         }
         self.plan_key = key;
-        self.error = None;
+        self.mask_error = None;
+        self.format_error = None;
 
         let l = self.lang();
         let episode = Template::parse(&self.config.fmt_episode).map_err(|e| e.localized(l));
@@ -298,7 +315,8 @@ impl App {
                 );
             }
             (e, m, k) => {
-                self.error = e.err().or(m.err()).or(k.err());
+                self.format_error = e.err().or(m.err());
+                self.mask_error = k.err();
                 self.plan.clear();
             }
         }
@@ -494,8 +512,10 @@ impl App {
                     b
                 }
                 Err(e) => {
-                    self.message =
-                        Some(format!("{}: {e}", tr(self.lang(), "msg_history_not_saved")));
+                    self.notice = Some(Notice {
+                        text: format!("{}: {e}", tr(self.lang(), "msg_history_not_saved")),
+                        bad: true,
+                    });
                     return;
                 }
             },
@@ -558,7 +578,15 @@ impl App {
                                 g.episodes = eps;
                                 g.state = GroupState::Ready;
                             }
-                            Err(e) => g.state = GroupState::Failed(e),
+                            Err(e) => {
+                                if is_setup_error(&e) {
+                                    self.notice = Some(Notice {
+                                        text: e.localized(l),
+                                        bad: true,
+                                    });
+                                }
+                                g.state = GroupState::Failed(e);
+                            }
                         }
                     }
                     self.revision += 1;
@@ -588,7 +616,15 @@ impl App {
                                 r.selected = 0;
                                 r.state = SubState::Found;
                             }
-                            Err(e) => r.state = SubState::Failed(e),
+                            Err(e) => {
+                                if is_setup_error(&e) {
+                                    self.notice = Some(Notice {
+                                        text: e.localized(l),
+                                        bad: true,
+                                    });
+                                }
+                                r.state = SubState::Failed(e);
+                            }
                         }
                     }
                 }
@@ -596,7 +632,15 @@ impl App {
                     if let Some(r) = self.sub_rows.iter_mut().find(|r| r.path == path) {
                         r.state = match res {
                             Ok(p) => SubState::Saved(p),
-                            Err(e) => SubState::Failed(e),
+                            Err(e) => {
+                                if is_setup_error(&e) {
+                                    self.notice = Some(Notice {
+                                        text: e.localized(l),
+                                        bad: true,
+                                    });
+                                }
+                                SubState::Failed(e)
+                            }
                         };
                     }
                 }
@@ -609,10 +653,11 @@ impl App {
                         tr(l, "msg_done"),
                         self.errors_text(&report.errors)
                     );
+                    let bad = !report.errors.is_empty() || saved.is_err();
                     if let Err(e) = saved {
                         msg.push_str(&format!(" — {}: {e}", tr(l, "msg_history_not_saved")));
                     }
-                    self.message = Some(msg);
+                    self.notice = Some(Notice { text: msg, bad });
                     self.follow_batch(&report.batch, true);
                     match &self.history_path {
                         Some(p) => self.history = History::load(p),
@@ -621,439 +666,1054 @@ impl App {
                 }
                 Msg::Undone { batch, errors } => {
                     self.busy = None;
-                    self.message = Some(format!(
-                        "{}{}",
-                        tr(l, "msg_undone"),
-                        self.errors_text(&errors)
-                    ));
+                    self.notice = Some(Notice {
+                        text: format!("{}{}", tr(l, "msg_undone"), self.errors_text(&errors)),
+                        bad: !errors.is_empty(),
+                    });
                     self.follow_batch(&batch, false);
                 }
             }
         }
     }
 
-    fn status_text(&self, s: &Status) -> String {
-        let l = self.lang();
-        match s {
-            Status::Ok => tr(l, "st_ok").into(),
-            Status::Unchanged => tr(l, "st_same").into(),
-            Status::Exists => tr(l, "st_exists").into(),
-            Status::Duplicate => tr(l, "st_dup").into(),
-            Status::NoMatch => tr(l, "st_nomatch").into(),
-            Status::Missing(f) => format!("{}: {}", tr(l, "st_missing"), f.join(", ")),
+    /// Dopo aver aggiunto file: con i dati online attivi la ricerca riparte (la cache la rende leggera).
+    fn after_add(&mut self) {
+        if self.online && !self.files.is_empty() {
+            self.start_search();
+        }
+    }
+
+    fn pick_files(&mut self) {
+        if let Some(paths) = rfd::FileDialog::new()
+            .add_filter("Video", VIDEO_EXT)
+            .pick_files()
+        {
+            for p in paths {
+                self.add_path(&p);
+            }
+            self.after_add();
+        }
+    }
+
+    fn pick_folder(&mut self) {
+        if let Some(p) = rfd::FileDialog::new().pick_folder() {
+            self.add_path(&p);
+            self.after_add();
+        }
+    }
+
+    fn accept_drops(&mut self, ctx: &egui::Context) {
+        let dropped: Vec<PathBuf> = ctx.input(|i| {
+            i.raw
+                .dropped_files
+                .iter()
+                .map(|f| f.path().to_path_buf())
+                .collect()
+        });
+        if dropped.is_empty() || self.busy.is_some() {
+            return;
+        }
+        for p in dropped {
+            self.add_path(&p);
+        }
+        self.after_add();
+    }
+
+    fn shortcuts(&mut self, ctx: &egui::Context) {
+        let (open, esc) = ctx.input(|i| {
+            (
+                i.modifiers.command && i.key_pressed(egui::Key::O),
+                i.key_pressed(egui::Key::Escape),
+            )
+        });
+        if open && self.busy.is_none() {
+            self.pick_files();
+        }
+        if esc {
+            self.show_options = false;
+            self.save_as = None;
         }
     }
 
     fn top_bar(&mut self, ui: &mut egui::Ui) {
         let l = self.lang();
+        let idle = self.busy.is_none();
         ui.horizontal(|ui| {
-            ui.selectable_value(&mut self.view, View::Rename, tr(l, "tab_rename"));
-            ui.selectable_value(&mut self.view, View::Subs, tr(l, "tab_subs"));
-            ui.separator();
-            let idle = self.busy.is_none();
-            if ui
-                .add_enabled(idle, egui::Button::new(tr(l, "add_files")))
-                .clicked()
-                && let Some(paths) = rfd::FileDialog::new().pick_files()
-            {
-                for p in paths {
-                    self.add_path(&p);
+            ui.add_enabled_ui(idle, |ui| {
+                if ui::pill(ui, tr(l, "add_files"), Kind::Soft, 15.0)
+                    .on_hover_text(tr(l, "tip_add_files"))
+                    .clicked()
+                {
+                    self.pick_files();
                 }
-            }
-            if ui
-                .add_enabled(idle, egui::Button::new(tr(l, "add_folder")))
-                .clicked()
-                && let Some(p) = rfd::FileDialog::new().pick_folder()
-            {
-                self.add_path(&p);
-            }
-            if ui
-                .add_enabled(idle, egui::Button::new(tr(l, "clear")))
-                .clicked()
-            {
-                self.files.clear();
-            }
-            ui.label(format!("{} {}", self.files.len(), tr(l, "files_count")));
+                if ui::pill(ui, tr(l, "add_folder"), Kind::Soft, 15.0)
+                    .on_hover_text(tr(l, "tip_add_folder"))
+                    .clicked()
+                {
+                    self.pick_folder();
+                }
+            });
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
-                egui::ComboBox::from_id_salt("lang")
-                    .selected_text(self.config.ui_lang.name())
-                    .show_ui(ui, |ui| {
-                        for lang in Lang::ALL {
-                            ui.selectable_value(&mut self.config.ui_lang, lang, lang.name());
-                        }
-                    });
-                ui.label(tr(l, "language"));
+                let kind = if self.show_options {
+                    Kind::Selected
+                } else {
+                    Kind::Soft
+                };
+                if ui::pill(ui, tr(l, "options"), kind, 15.0).clicked() {
+                    self.show_options = !self.show_options;
+                }
             });
         });
     }
 
-    fn formats_section(&mut self, ui: &mut egui::Ui) {
+    /// Le schede e, a destra, quanti file ci sono e come svuotare l'elenco.
+    fn tabs_row(&mut self, ui: &mut egui::Ui) {
         let l = self.lang();
-        ui.label(tr(l, "mask"));
-        ui.add(
-            egui::TextEdit::singleline(&mut self.config.mask)
-                .hint_text(tr(l, "mask_hint"))
-                .desired_width(f32::INFINITY),
-        );
-        ui.add_space(10.0);
+        ui.horizontal(|ui| {
+            for (view, key) in [(View::Rename, "tab_rename"), (View::Subs, "tab_subs")] {
+                let kind = if self.view == view {
+                    Kind::Selected
+                } else {
+                    Kind::Soft
+                };
+                if ui::button(ui, tr(l, key), kind).clicked() {
+                    self.view = view;
+                }
+            }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                if !self.files.is_empty() {
+                    ui.add_enabled_ui(self.busy.is_none(), |ui| {
+                        if ui::button(ui, tr(l, "clear"), Kind::Ghost).clicked() {
+                            self.files.clear();
+                            self.sub_rows.clear();
+                            self.groups.clear();
+                        }
+                    });
+                    ui.label(muted(format!(
+                        "{} {}",
+                        self.files.len(),
+                        tr(l, "files_count")
+                    )));
+                }
+            });
+        });
+    }
 
+    fn empty_card(&mut self, ui: &mut egui::Ui, hovering: bool) {
+        let l = self.lang();
+        let drop = ui::drop_works();
+        ui.add_space((ui.available_height() * 0.12).max(0.0));
+        let outline = if hovering {
+            Stroke::new(1.5, ui::ACCENT)
+        } else {
+            Stroke::new(1.0, ui::LINE)
+        };
+        ui::card(ui, outline, |ui| {
+            ui.vertical_centered(|ui| {
+                ui.add_space(18.0);
+                ui::empty_icon(ui, hovering);
+                ui.add_space(8.0);
+                let (title, body) = if drop {
+                    ("drop_title", "drop_body")
+                } else {
+                    ("open_title", "open_body")
+                };
+                let title = if hovering {
+                    tr(l, "drop_release")
+                } else {
+                    tr(l, title)
+                };
+                ui.label(RichText::new(title).size(19.0).strong());
+                ui.label(muted(tr(l, body)));
+                ui.add_space(14.0);
+                // Due pulsanti centrati: la loro larghezza decide il margine a sinistra.
+                let w = 300.0;
+                ui.allocate_ui_with_layout(
+                    egui::vec2(w, 40.0),
+                    egui::Layout::left_to_right(egui::Align::Center),
+                    |ui| {
+                        if ui::pill(ui, tr(l, "add_files"), Kind::Primary, 15.0).clicked() {
+                            self.pick_files();
+                        }
+                        if ui::pill(ui, tr(l, "add_folder"), Kind::Soft, 15.0).clicked() {
+                            self.pick_folder();
+                        }
+                    },
+                );
+                ui.add_space(18.0);
+            });
+        });
+    }
+
+    fn reading_card(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang();
+        ui::card(ui, Stroke::new(1.0, ui::LINE), |ui| {
+            ui::heading(ui, tr(l, "card_reading"));
+            ui.add_space(4.0);
+            ui.label(muted(tr(l, "mask")));
+            ui.add(
+                egui::TextEdit::singleline(&mut self.config.mask)
+                    .font(egui::TextStyle::Monospace)
+                    .hint_text(tr(l, "mask_hint"))
+                    .desired_width(f32::INFINITY),
+            );
+            if let Some(e) = &self.mask_error {
+                ui.label(RichText::new(e).size(13.0).color(ui::DANGER));
+            }
+            ui.add(egui::Label::new(muted(tr(l, "mask_help"))).wrap());
+            ui.add_space(8.0);
+            ui.separator();
+            ui.add_space(4.0);
+            if ui
+                .checkbox(&mut self.online, RichText::new(tr(l, "online")).strong())
+                .changed()
+            {
+                self.revision += 1;
+                self.after_add();
+            }
+            ui.add(egui::Label::new(muted(tr(l, "online_help"))).wrap());
+            if !self.online {
+                return;
+            }
+            ui.add_space(4.0);
+            ui.add_enabled_ui(!self.files.is_empty(), |ui| {
+                if ui::button(ui, tr(l, "search_again"), Kind::Soft).clicked() {
+                    self.start_search();
+                }
+            });
+            // Un errore che vale per tutti (la chiave) si scrive una volta sola, non sotto ogni titolo.
+            let setup = self.groups.iter().find_map(|g| match &g.state {
+                GroupState::Failed(e) if is_setup_error(e) => Some(e.localized(l)),
+                _ => None,
+            });
+            if let Some(e) = &setup {
+                ui.label(RichText::new(e).size(13.0).color(ui::DANGER));
+            }
+            let mut pick: Option<(usize, usize)> = None;
+            for (gi, g) in self.groups.iter().enumerate() {
+                ui.add_space(6.0);
+                ui.horizontal(|ui| {
+                    if g.state == GroupState::Loading {
+                        ui.add(egui::Spinner::new().size(14.0).color(ui::MUTED));
+                    }
+                    ui.add(egui::Label::new(RichText::new(&g.spec.query).strong()).truncate());
+                });
+                if let GroupState::Failed(e) = &g.state
+                    && !is_setup_error(e)
+                {
+                    ui.label(RichText::new(e.localized(l)).size(13.0).color(ui::DANGER));
+                }
+                if !g.candidates.is_empty() {
+                    let mut sel = g.selected;
+                    egui::ComboBox::from_id_salt(("cand", gi))
+                        .width(ui.available_width())
+                        .selected_text(g.candidates[g.selected].label())
+                        .show_ui(ui, |ui| {
+                            for (i, c) in g.candidates.iter().enumerate() {
+                                ui.selectable_value(&mut sel, i, c.label());
+                            }
+                        });
+                    if sel != g.selected {
+                        pick = Some((gi, sel));
+                    }
+                }
+            }
+            if let Some((gi, sel)) = pick {
+                self.select_candidate(gi, sel);
+            }
+        });
+    }
+
+    fn format_card(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang();
         let presets = self.presets();
         let builtin = builtin_presets().len();
         let current = presets
             .iter()
             .position(|p| p.episode == self.config.fmt_episode && p.movie == self.config.fmt_movie);
-        ui.label(tr(l, "preset"));
-        let mut pick = current;
-        egui::ComboBox::from_id_salt("preset")
-            .selected_text(current.map(|i| presets[i].name.as_str()).unwrap_or("—"))
-            .show_ui(ui, |ui| {
-                for (i, p) in presets.iter().enumerate() {
-                    ui.selectable_value(&mut pick, Some(i), p.name.as_str());
+        ui::card(ui, Stroke::new(1.0, ui::LINE), |ui| {
+            ui::heading(ui, tr(l, "card_format"));
+            ui.add_space(4.0);
+            ui.horizontal(|ui| {
+                ui.label(muted(tr(l, "preset")));
+                let mut pick = current;
+                egui::ComboBox::from_id_salt("preset")
+                    .width(150.0)
+                    .selected_text(
+                        current
+                            .map(|i| presets[i].name.as_str())
+                            .unwrap_or(tr(l, "preset_custom")),
+                    )
+                    .show_ui(ui, |ui| {
+                        for (i, p) in presets.iter().enumerate() {
+                            ui.selectable_value(&mut pick, Some(i), p.name.as_str());
+                        }
+                    });
+                if pick != current
+                    && let Some(i) = pick
+                {
+                    self.config.fmt_episode = presets[i].episode.clone();
+                    self.config.fmt_movie = presets[i].movie.clone();
+                }
+                if ui::button(ui, tr(l, "preset_save_as"), Kind::Soft).clicked() {
+                    let name = current
+                        .filter(|&i| i >= builtin)
+                        .map(|i| presets[i].name.clone());
+                    self.save_as = Some(name.unwrap_or_default());
+                }
+                let user = current.filter(|&i| i >= builtin);
+                if let Some(i) = user
+                    && ui::button(ui, tr(l, "preset_delete"), Kind::Ghost).clicked()
+                {
+                    self.config.presets.remove(i - builtin);
+                    self.save_config();
                 }
             });
-        if pick != current
-            && let Some(i) = pick
-        {
-            self.config.fmt_episode = presets[i].episode.clone();
-            self.config.fmt_movie = presets[i].movie.clone();
-            if i >= builtin {
-                self.preset_name = presets[i].name.clone();
+            let mut save = None;
+            let mut cancel = false;
+            if let Some(name) = &mut self.save_as {
+                ui.horizontal(|ui| {
+                    let r = ui.add(
+                        egui::TextEdit::singleline(name)
+                            .hint_text(tr(l, "preset_name"))
+                            .desired_width(170.0),
+                    );
+                    r.request_focus();
+                    let ok = !name.trim().is_empty();
+                    let enter = r.lost_focus() && ui.input(|i| i.key_pressed(egui::Key::Enter));
+                    ui.add_enabled_ui(ok, |ui| {
+                        if ui::button(ui, tr(l, "save"), Kind::Primary).clicked() || (enter && ok) {
+                            save = Some(name.trim().to_string());
+                        }
+                    });
+                    if ui::close(ui).clicked() {
+                        cancel = true;
+                    }
+                });
             }
-        }
-        ui.horizontal(|ui| {
-            ui.add(
-                egui::TextEdit::singleline(&mut self.preset_name)
-                    .hint_text(tr(l, "preset_name"))
-                    .desired_width(150.0),
-            );
-            let name = self.preset_name.trim().to_string();
-            if ui
-                .add_enabled(!name.is_empty(), egui::Button::new(tr(l, "preset_save")))
-                .clicked()
-            {
+            if let Some(name) = save {
                 self.config.upsert_preset(Preset {
                     name,
                     episode: self.config.fmt_episode.clone(),
                     movie: self.config.fmt_movie.clone(),
                 });
+                self.save_as = None;
                 self.save_config();
             }
-            let user = current.filter(|&i| i >= builtin);
-            if ui
-                .add_enabled(user.is_some(), egui::Button::new(tr(l, "preset_delete")))
-                .clicked()
-                && let Some(i) = user
-            {
-                self.config.presets.remove(i - builtin);
-                self.save_config();
+            if cancel {
+                self.save_as = None;
             }
+            ui.add_space(4.0);
+            ui.label(muted(tr(l, "fmt_episode")));
+            ui.add(
+                egui::TextEdit::multiline(&mut self.config.fmt_episode)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+            ui.label(muted(tr(l, "fmt_movie")));
+            ui.add(
+                egui::TextEdit::multiline(&mut self.config.fmt_movie)
+                    .font(egui::TextStyle::Monospace)
+                    .desired_rows(2)
+                    .desired_width(f32::INFINITY),
+            );
+            if let Some(e) = &self.format_error {
+                ui.label(
+                    RichText::new(format!("{}: {e}", tr(l, "errors")))
+                        .size(13.0)
+                        .color(ui::DANGER),
+                );
+            }
+            ui.add_space(4.0);
+            egui::CollapsingHeader::new(muted(tr(l, "placeholders")))
+                .id_salt("placeholders")
+                .show(ui, |ui| {
+                    egui::Grid::new("ph")
+                        .num_columns(2)
+                        .spacing([12.0, 4.0])
+                        .show(ui, |ui| {
+                            for (code, key) in [
+                                ("{n}", "ph_n"),
+                                ("{y}", "ph_y"),
+                                ("{s} {e}", "ph_se"),
+                                ("{s00} {e00}", "ph_se00"),
+                                ("{s00e00}", "ph_s00e00"),
+                                ("{sxe}", "ph_sxe"),
+                                ("{t}", "ph_t"),
+                                ("/", "ph_slash"),
+                                ("|upper |lower |title", "ph_case"),
+                                ("|default:testo", "ph_default"),
+                                ("|prefix:… |suffix:…", "ph_affix"),
+                            ] {
+                                ui.label(RichText::new(code).monospace().color(ui::ACCENT_TEXT));
+                                ui.label(muted(tr(l, key)));
+                                ui.end_row();
+                            }
+                        });
+                });
         });
-        ui.add_space(6.0);
-
-        ui.label(tr(l, "fmt_episode"));
-        ui.add(
-            egui::TextEdit::multiline(&mut self.config.fmt_episode)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
-        ui.label(tr(l, "fmt_movie"));
-        ui.add(
-            egui::TextEdit::multiline(&mut self.config.fmt_movie)
-                .desired_rows(2)
-                .desired_width(f32::INFINITY),
-        );
-        ui.add_space(6.0);
-        ui.label(tr(l, "dest"));
-        ui.add(
-            egui::TextEdit::singleline(&mut self.config.dest)
-                .hint_text(tr(l, "dest_hint"))
-                .desired_width(f32::INFINITY),
-        );
     }
 
-    fn action_section(&mut self, ui: &mut egui::Ui) {
+    fn status_look(&self, s: &Status) -> (String, egui::Color32, &'static str) {
         let l = self.lang();
-        ui.label(tr(l, "action"));
-        ui.radio_value(&mut self.action, Action::Move, tr(l, "act_move"));
-        ui.radio_value(&mut self.action, Action::Copy, tr(l, "act_copy"));
-        ui.checkbox(&mut self.with_sidecars, tr(l, "sidecars"));
-        ui.add_space(8.0);
-        // Durante un download di sottotitoli i percorsi non devono cambiare.
+        match s {
+            Status::Ok => (tr(l, "st_ok").into(), ui::SUCCESS, "tip_ok"),
+            Status::Unchanged => (tr(l, "st_same").into(), ui::MUTED, "tip_same"),
+            Status::Exists => (tr(l, "st_exists").into(), ui::WARN, "tip_exists"),
+            Status::Duplicate => (tr(l, "st_dup").into(), ui::WARN, "tip_dup"),
+            Status::NoMatch => (tr(l, "st_nomatch").into(), ui::DANGER, "tip_nomatch"),
+            Status::Missing(f) => {
+                let fields: Vec<String> = f.iter().map(|x| format!("{{{x}}}")).collect();
+                (
+                    format!("{} {}", tr(l, "st_missing"), fields.join(" ")),
+                    ui::DANGER,
+                    "tip_missing",
+                )
+            }
+        }
+    }
+
+    /// L'anteprima riempie lo spazio che resta; le righe fuori vista non si disegnano.
+    fn preview_card(&mut self, ui: &mut egui::Ui) {
+        const ROW: f32 = 50.0;
+        let l = self.lang();
+        let ready = self.plan.iter().filter(|i| i.status == Status::Ok).count();
+        let same = self
+            .plan
+            .iter()
+            .filter(|i| i.status == Status::Unchanged)
+            .count();
+        let review = self.plan.len() - ready - same;
+        let mut remove: Option<PathBuf> = None;
+        egui::Frame::new()
+            .fill(ui::CARD)
+            .stroke(Stroke::new(1.0, ui::LINE))
+            .corner_radius(egui::CornerRadius::same(12))
+            .inner_margin(Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(ui.available_height());
+                ui.horizontal(|ui| {
+                    ui::heading(ui, tr(l, "card_preview"));
+                    ui.add_space(6.0);
+                    ui::chip(ui, &format!("{ready} {}", tr(l, "sum_ready")), ui::SUCCESS);
+                    if review > 0 {
+                        ui::chip(ui, &format!("{review} {}", tr(l, "sum_review")), ui::WARN);
+                    }
+                    if same > 0 {
+                        ui::chip(ui, &format!("{same} {}", tr(l, "sum_same")), ui::MUTED);
+                    }
+                });
+                ui.add_space(6.0);
+                let width = ui.available_width();
+                ui.spacing_mut().item_spacing.y = 0.0;
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW, self.plan.len(), |ui, range| {
+                        for i in range {
+                            let item = &self.plan[i];
+                            let (rect, resp) = ui
+                                .allocate_exact_size(egui::vec2(width, ROW), egui::Sense::hover());
+                            if i > 0 {
+                                ui.painter().hline(
+                                    rect.x_range(),
+                                    rect.top(),
+                                    Stroke::new(1.0, ui::LINE),
+                                );
+                            }
+                            if resp.hovered() {
+                                ui.painter().rect_filled(
+                                    rect.shrink(1.0),
+                                    egui::CornerRadius::same(8),
+                                    ui::PANEL,
+                                );
+                            }
+                            let mut row = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect.shrink2(egui::vec2(8.0, 4.0)))
+                                    .layout(egui::Layout::right_to_left(egui::Align::Center)),
+                            );
+                            if ui::close(&mut row).on_hover_text(tr(l, "remove")).clicked() {
+                                remove = Some(item.source.clone());
+                            }
+                            let (text, color, tip) = self.status_look(&item.status);
+                            ui::chip(&mut row, &text, color).on_hover_text(tr(l, tip));
+                            row.add_space(8.0);
+                            row.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
+                                ui.spacing_mut().item_spacing.y = 2.0;
+                                let new = match &item.target {
+                                    Some(t) => {
+                                        let base = item.source.parent();
+                                        let shown =
+                                            base.and_then(|b| t.strip_prefix(b).ok()).unwrap_or(t);
+                                        RichText::new(shown.display().to_string())
+                                            .size(14.0)
+                                            .color(ui::TEXT)
+                                    }
+                                    None => RichText::new("—").color(ui::MUTED),
+                                };
+                                ui.add(egui::Label::new(new).truncate());
+                                let old = item
+                                    .source
+                                    .file_name()
+                                    .map(|n| n.to_string_lossy().into_owned())
+                                    .unwrap_or_default();
+                                ui.add(
+                                    egui::Label::new(
+                                        muted(format!("{} {old}", tr(l, "from"))).size(12.5),
+                                    )
+                                    .truncate(),
+                                );
+                            });
+                        }
+                    });
+            });
+        if let Some(p) = remove {
+            self.files.retain(|f| *f != p);
+            self.sub_rows.retain(|r| r.path != p);
+            self.plan_key.clear();
+        }
+    }
+
+    fn rename_page(&mut self, ui: &mut egui::Ui) {
+        const SIDE: f32 = 360.0;
+        if ui.available_width() >= 900.0 {
+            ui.horizontal_top(|ui| {
+                ui.spacing_mut().item_spacing.x = 12.0;
+                let h = ui.available_height();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(SIDE, h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        ui.set_width(SIDE);
+                        egui::ScrollArea::vertical()
+                            .id_salt("left")
+                            .auto_shrink([false, false])
+                            .show(ui, |ui| {
+                                self.reading_card(ui);
+                                ui.add_space(12.0);
+                                self.format_card(ui);
+                            });
+                    },
+                );
+                let w = ui.available_width();
+                ui.allocate_ui_with_layout(
+                    egui::vec2(w, h),
+                    egui::Layout::top_down(egui::Align::Min),
+                    |ui| {
+                        self.preview_card(ui);
+                    },
+                );
+            });
+        } else {
+            egui::ScrollArea::vertical()
+                .id_salt("narrow")
+                .auto_shrink([false, false])
+                .show(ui, |ui| {
+                    self.reading_card(ui);
+                    ui.add_space(12.0);
+                    self.format_card(ui);
+                    ui.add_space(12.0);
+                    ui.allocate_ui_with_layout(
+                        egui::vec2(ui.available_width(), 420.0),
+                        egui::Layout::top_down(egui::Align::Min),
+                        |ui| self.preview_card(ui),
+                    );
+                });
+        }
+    }
+
+    fn subs_page(&mut self, ui: &mut egui::Ui) {
+        const ROW: f32 = 72.0;
+        let l = self.lang();
+        if self.sub_rows.is_empty() {
+            ui::card(ui, Stroke::new(1.0, ui::LINE), |ui| {
+                ui.vertical_centered(|ui| {
+                    ui.add_space(12.0);
+                    ui.label(RichText::new(tr(l, "subs_hint_title")).size(17.0).strong());
+                    ui.add(egui::Label::new(muted(tr(l, "subs_hint"))).wrap());
+                    ui.add_space(12.0);
+                });
+            });
+            return;
+        }
+        let found = self
+            .sub_rows
+            .iter()
+            .filter(|r| !r.candidates.is_empty())
+            .count();
+        let none = self
+            .sub_rows
+            .iter()
+            .filter(|r| r.state == SubState::NotFound)
+            .count();
+        egui::Frame::new()
+            .fill(ui::CARD)
+            .stroke(Stroke::new(1.0, ui::LINE))
+            .corner_radius(egui::CornerRadius::same(12))
+            .inner_margin(Margin::same(14))
+            .show(ui, |ui| {
+                ui.set_width(ui.available_width());
+                ui.set_min_height(ui.available_height());
+                ui.horizontal(|ui| {
+                    ui::heading(ui, tr(l, "card_subs"));
+                    ui.add_space(6.0);
+                    ui::chip(ui, &format!("{found} {}", tr(l, "sum_found")), ui::SUCCESS);
+                    if none > 0 {
+                        ui::chip(ui, &format!("{none} {}", tr(l, "sum_none")), ui::MUTED);
+                    }
+                });
+                ui.add_space(6.0);
+                let width = ui.available_width();
+                ui.spacing_mut().item_spacing.y = 0.0;
+                let rows = self.sub_rows.len();
+                egui::ScrollArea::vertical()
+                    .auto_shrink([false, false])
+                    .show_rows(ui, ROW, rows, |ui, range| {
+                        for i in range {
+                            let (rect, _) = ui
+                                .allocate_exact_size(egui::vec2(width, ROW), egui::Sense::hover());
+                            if i > 0 {
+                                ui.painter().hline(
+                                    rect.x_range(),
+                                    rect.top(),
+                                    Stroke::new(1.0, ui::LINE),
+                                );
+                            }
+                            let mut cell = ui.new_child(
+                                egui::UiBuilder::new()
+                                    .max_rect(rect.shrink2(egui::vec2(8.0, 6.0)))
+                                    .layout(egui::Layout::top_down(egui::Align::Min)),
+                            );
+                            cell.spacing_mut().item_spacing.y = 4.0;
+                            let r = &mut self.sub_rows[i];
+                            let (text, color) = match &r.state {
+                                SubState::Searching => (tr(l, "searching").to_string(), ui::MUTED),
+                                SubState::Found => (tr(l, "sub_found").to_string(), ui::SUCCESS),
+                                SubState::NotFound => (tr(l, "sub_none").to_string(), ui::MUTED),
+                                SubState::Downloading => {
+                                    (tr(l, "sub_downloading").to_string(), ui::ACCENT_TEXT)
+                                }
+                                SubState::Saved(_) => (tr(l, "sub_saved").to_string(), ui::SUCCESS),
+                                SubState::Failed(_) => (tr(l, "sub_error").to_string(), ui::DANGER),
+                            };
+                            let name = r
+                                .path
+                                .file_name()
+                                .map(|n| n.to_string_lossy().into_owned())
+                                .unwrap_or_default();
+                            cell.horizontal(|ui| {
+                                ui.set_min_height(28.0);
+                                // La casella c'è solo dove c'è qualcosa da scaricare.
+                                if r.candidates.is_empty() {
+                                    ui.add_space(26.0);
+                                } else {
+                                    ui.checkbox(&mut r.include, "");
+                                }
+                                ui.with_layout(
+                                    egui::Layout::right_to_left(egui::Align::Center),
+                                    |ui| {
+                                        ui::chip(ui, &text, color);
+                                        ui.with_layout(
+                                            egui::Layout::left_to_right(egui::Align::Center),
+                                            |ui| {
+                                                ui.add(
+                                                    egui::Label::new(
+                                                        RichText::new(name).size(14.0),
+                                                    )
+                                                    .truncate(),
+                                                );
+                                            },
+                                        );
+                                    },
+                                );
+                            });
+                            cell.horizontal(|ui| {
+                                ui.add_space(26.0);
+                                match &r.state {
+                                    // Un errore che vale per tutti è già scritto una volta sola, sopra la barra in basso.
+                                    SubState::Failed(e) if !is_setup_error(e) => {
+                                        ui.add(
+                                            egui::Label::new(
+                                                RichText::new(e.localized(l))
+                                                    .size(13.0)
+                                                    .color(ui::DANGER),
+                                            )
+                                            .truncate(),
+                                        );
+                                    }
+                                    SubState::Saved(p) => {
+                                        let saved = p
+                                            .file_name()
+                                            .map(|n| n.to_string_lossy().into_owned())
+                                            .unwrap_or_default();
+                                        ui.add(egui::Label::new(muted(saved)).truncate());
+                                    }
+                                    _ if !r.candidates.is_empty() => {
+                                        egui::ComboBox::from_id_salt(("subcand", i))
+                                            .width(ui.available_width())
+                                            .selected_text(r.candidates[r.selected].label())
+                                            .show_ui(ui, |ui| {
+                                                for (k, c) in r.candidates.iter().enumerate() {
+                                                    ui.selectable_value(
+                                                        &mut r.selected,
+                                                        k,
+                                                        c.label(),
+                                                    );
+                                                }
+                                            });
+                                    }
+                                    _ => {}
+                                }
+                            });
+                        }
+                    });
+            });
+    }
+
+    fn rename_bar(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang();
         let downloading = self
             .sub_rows
             .iter()
             .any(|r| r.state == SubState::Downloading);
         let idle = self.busy.is_none() && !downloading;
-        let ready = idle && self.plan.iter().any(|i| i.status == Status::Ok);
-        ui.horizontal(|ui| {
-            if ui
-                .add_enabled(ready, egui::Button::new(tr(l, "apply")))
-                .clicked()
-            {
-                self.start_apply();
-            }
-            let can_undo = idle && !self.history.batches.is_empty();
-            if ui
-                .add_enabled(can_undo, egui::Button::new(tr(l, "undo")))
-                .clicked()
-            {
-                self.start_undo();
-            }
-        });
-        match self.busy {
-            Some(Busy::Applying(done, total)) => {
-                ui.add(
-                    egui::ProgressBar::new(done as f32 / total.max(1) as f32)
-                        .text(format!("{} {done}/{total}", tr(l, "working"))),
-                );
-            }
-            Some(Busy::Undoing) => {
-                ui.horizontal(|ui| {
-                    ui.spinner();
-                    ui.label(tr(l, "undoing"));
+        let ready = self.plan.iter().filter(|i| i.status == Status::Ok).count();
+        let next = self.config.dest.trim().is_empty();
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(muted(tr(l, "dest")));
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                // L'azione della finestra sta in basso a destra, dove l'occhio arriva per ultimo.
+                let verb = if self.action == Action::Move {
+                    "do_rename"
+                } else {
+                    "do_copy"
+                };
+                let label = if ready > 0 {
+                    format!("{} {ready} {}", tr(l, verb), tr(l, "files_count"))
+                } else {
+                    tr(l, verb).to_string()
+                };
+                ui.add_enabled_ui(idle && ready > 0, |ui| {
+                    if ui::pill(ui, &label, Kind::Primary, 16.0).clicked() {
+                        self.start_apply();
+                    }
                 });
-            }
-            None => {}
-        }
-        if let Some(m) = &self.message {
-            ui.add_space(6.0);
-            ui.label(m.as_str());
-        }
-        if let Some(err) = &self.error {
-            ui.add_space(8.0);
-            ui.colored_label(
-                egui::Color32::LIGHT_RED,
-                format!("{}: {err}", tr(l, "errors")),
-            );
-        }
-    }
-
-    fn online_section(&mut self, ui: &mut egui::Ui) {
-        let l = self.lang();
-        ui.checkbox(&mut self.online, tr(l, "online"));
-        if !self.online {
-            return;
-        }
-        if ui
-            .add_enabled(!self.files.is_empty(), egui::Button::new(tr(l, "search")))
-            .clicked()
-        {
-            self.start_search();
-        }
-        let mut pick: Option<(usize, usize)> = None;
-        for (gi, g) in self.groups.iter().enumerate() {
-            ui.add_space(4.0);
-            ui.label(egui::RichText::new(&g.spec.query).strong());
-            match &g.state {
-                GroupState::Loading => {
-                    ui.label(tr(l, "searching"));
-                }
-                GroupState::Failed(e) => {
-                    ui.colored_label(egui::Color32::LIGHT_RED, e.localized(l));
-                }
-                GroupState::Ready => {}
-            }
-            if !g.candidates.is_empty() {
-                let mut sel = g.selected;
-                egui::ComboBox::from_id_salt(("cand", gi))
-                    .width(300.0)
-                    .selected_text(g.candidates[g.selected].label())
+                ui.add_enabled_ui(idle && !self.history.batches.is_empty(), |ui| {
+                    if ui::pill(ui, tr(l, "undo"), Kind::Soft, 15.0)
+                        .on_hover_text(tr(l, "tip_undo"))
+                        .clicked()
+                    {
+                        self.start_undo();
+                    }
+                });
+                ui.add_space(10.0);
+                ui.checkbox(&mut self.with_sidecars, tr(l, "sidecars"))
+                    .on_hover_text(tr(l, "tip_sidecars"));
+                egui::ComboBox::from_id_salt("action")
+                    .width(90.0)
+                    .selected_text(tr(
+                        l,
+                        if self.action == Action::Move {
+                            "act_move"
+                        } else {
+                            "act_copy"
+                        },
+                    ))
                     .show_ui(ui, |ui| {
-                        for (i, c) in g.candidates.iter().enumerate() {
-                            ui.selectable_value(&mut sel, i, c.label());
-                        }
+                        ui.selectable_value(&mut self.action, Action::Move, tr(l, "act_move"));
+                        ui.selectable_value(&mut self.action, Action::Copy, tr(l, "act_copy"));
                     });
-                if sel != g.selected {
-                    pick = Some((gi, sel));
+                ui.add_space(10.0);
+                let mut beside = next;
+                if ui.checkbox(&mut beside, tr(l, "dest_next")).changed() {
+                    if beside {
+                        self.config.dest.clear();
+                    } else if let Some(p) = rfd::FileDialog::new().pick_folder() {
+                        self.config.dest = p.display().to_string();
+                    }
                 }
-            }
-        }
-        if let Some((gi, sel)) = pick {
-            self.select_candidate(gi, sel);
-        }
-    }
-
-    fn subs_section(&mut self, ui: &mut egui::Ui) {
-        let l = self.lang();
-        ui.label(tr(l, "sub_lang"));
-        egui::ComboBox::from_id_salt("sublang")
-            .selected_text(match self.sub_lang {
-                Some(i) => LANGS[i].1,
-                None => tr(l, "sub_lang_pick"),
-            })
-            .show_ui(ui, |ui| {
-                for (i, (_, name)) in LANGS.iter().enumerate() {
-                    ui.selectable_value(&mut self.sub_lang, Some(i), *name);
+                if ui::icon_button(ui, ui::Icon::Folder)
+                    .on_hover_text(tr(l, "dest_pick"))
+                    .clicked()
+                    && let Some(p) = rfd::FileDialog::new().pick_folder()
+                {
+                    self.config.dest = p.display().to_string();
+                }
+                if !next {
+                    ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(&self.config.dest).size(13.0).color(ui::TEXT),
+                            )
+                            .truncate(),
+                        );
+                    });
                 }
             });
+        });
+    }
+
+    fn subs_bar(&mut self, ui: &mut egui::Ui) {
+        let l = self.lang();
+        let idle = self.busy.is_none();
+        let working = self
+            .sub_rows
+            .iter()
+            .any(|r| matches!(r.state, SubState::Searching | SubState::Downloading));
+        let to_get = self
+            .sub_rows
+            .iter()
+            .filter(|r| r.include && r.state == SubState::Found)
+            .count();
+        ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+            ui.label(muted(tr(l, "sub_lang")));
+            egui::ComboBox::from_id_salt("sublang")
+                .width(200.0)
+                .selected_text(match self.sub_lang {
+                    Some(i) => LANGS[i].1,
+                    None => tr(l, "sub_lang_pick"),
+                })
+                .show_ui(ui, |ui| {
+                    for (i, (_, name)) in LANGS.iter().enumerate() {
+                        ui.selectable_value(&mut self.sub_lang, Some(i), *name);
+                    }
+                });
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                let label = if to_get > 0 {
+                    format!("{} {to_get} {}", tr(l, "sub_download"), tr(l, "subs_word"))
+                } else {
+                    tr(l, "sub_download").to_string()
+                };
+                ui.add_enabled_ui(idle && !working && to_get > 0, |ui| {
+                    if ui::pill(ui, &label, Kind::Primary, 16.0).clicked() {
+                        self.sub_download();
+                    }
+                });
+                let can_search =
+                    idle && !working && self.sub_lang.is_some() && !self.files.is_empty();
+                ui.add_enabled_ui(can_search, |ui| {
+                    if ui::pill(ui, tr(l, "sub_search"), Kind::Soft, 15.0).clicked() {
+                        self.sub_search();
+                    }
+                });
+            });
+        });
+    }
+
+    /// Lavoro in corso, oppure l'esito dell'ultima operazione.
+    fn strip(&mut self, ui: &mut egui::Ui) -> bool {
+        let l = self.lang();
+        let count =
+            |s: &dyn Fn(&SubState) -> bool| self.sub_rows.iter().filter(|r| s(&r.state)).count();
+        let searching = count(&|s| *s == SubState::Searching);
+        let downloading = count(&|s| *s == SubState::Downloading);
+        let (title, frac) = match self.busy {
+            Some(Busy::Applying(done, total)) => (
+                Some((tr(l, "working"), format!("{done}/{total}"))),
+                Some(done as f32 / total.max(1) as f32),
+            ),
+            Some(Busy::Undoing) => (Some((tr(l, "undoing"), String::new())), None),
+            None if searching > 0 => {
+                let n = self.sub_rows.len();
+                (
+                    Some((tr(l, "subs_searching"), format!("{}/{n}", n - searching))),
+                    Some((n - searching) as f32 / n as f32),
+                )
+            }
+            None if downloading > 0 => (
+                Some((tr(l, "subs_downloading"), format!("{downloading}"))),
+                None,
+            ),
+            None => (None, None),
+        };
+        if let Some((title, detail)) = title {
+            ui.horizontal(|ui| {
+                ui.label(RichText::new(title).size(14.0).strong());
+                ui.label(muted(detail));
+            });
+            ui.add_space(4.0);
+            ui::bar(ui, frac);
+            return true;
+        }
+        let Some(n) = &self.notice else { return false };
+        let mut dismiss = false;
         ui.horizontal(|ui| {
-            let can_search =
-                self.sub_lang.is_some() && !self.files.is_empty() && self.busy.is_none();
-            if ui
-                .add_enabled(can_search, egui::Button::new(tr(l, "sub_search")))
-                .clicked()
-            {
-                self.view = View::Subs;
-                self.sub_search();
-            }
-            let can_dl = self.busy.is_none()
-                && self
-                    .sub_rows
-                    .iter()
-                    .any(|r| r.include && r.state == SubState::Found);
-            if ui
-                .add_enabled(can_dl, egui::Button::new(tr(l, "sub_download")))
-                .clicked()
-            {
-                self.sub_download();
-            }
-        });
-    }
-
-    fn settings_section(&mut self, ui: &mut egui::Ui) {
-        let l = self.lang();
-        egui::CollapsingHeader::new(tr(l, "settings")).show(ui, |ui| {
-            ui.label(tr(l, "provider"));
-            egui::ComboBox::from_id_salt("provider")
-                .selected_text(self.config.provider.name())
-                .show_ui(ui, |ui| {
-                    for p in Provider::ALL {
-                        ui.selectable_value(&mut self.config.provider, p, p.name());
-                    }
+            ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                dismiss = ui::close(ui).on_hover_text(tr(l, "dismiss")).clicked();
+                ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
+                    let (word, color) = if n.bad {
+                        ("attention", ui::WARN)
+                    } else {
+                        ("done", ui::SUCCESS)
+                    };
+                    ui.label(RichText::new(tr(l, word)).size(14.0).strong().color(color));
+                    ui.add(egui::Label::new(muted(&n.text)).truncate());
                 });
-            ui.label(tr(l, "tmdb_key"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.config.tmdb_key)
-                    .password(true)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.label(tr(l, "meta_lang"));
-            egui::ComboBox::from_id_salt("metalang")
-                .selected_text(self.config.meta_lang.clone())
-                .show_ui(ui, |ui| {
-                    for code in ["it", "en"] {
-                        ui.selectable_value(&mut self.config.meta_lang, code.to_string(), code);
-                    }
-                });
-            ui.label(tr(l, "os_key"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.config.os_api_key)
-                    .password(true)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.label(tr(l, "os_user"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.config.os_username)
-                    .desired_width(f32::INFINITY),
-            );
-            ui.label(tr(l, "os_pass"));
-            ui.add(
-                egui::TextEdit::singleline(&mut self.config.os_password)
-                    .password(true)
-                    .desired_width(f32::INFINITY),
-            );
-            if ui.button(tr(l, "save")).clicked() {
-                self.save_config();
-            }
+            });
         });
-    }
-
-    fn plan_view(&self, ui: &mut egui::Ui) {
-        let l = self.lang();
-        egui::ScrollArea::both()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                egui::Grid::new("plan")
-                    .striped(true)
-                    .num_columns(3)
-                    .spacing([16.0, 6.0])
-                    .show(ui, |ui| {
-                        ui.strong(tr(l, "col_current"));
-                        ui.strong(tr(l, "col_new"));
-                        ui.strong(tr(l, "col_status"));
-                        ui.end_row();
-                        for item in &self.plan {
-                            ui.label(
-                                item.source
-                                    .file_name()
-                                    .and_then(|n| n.to_str())
-                                    .unwrap_or("?"),
-                            );
-                            match &item.target {
-                                Some(t) => {
-                                    let shown = item
-                                        .source
-                                        .parent()
-                                        .and_then(|b| t.strip_prefix(b).ok())
-                                        .unwrap_or(t);
-                                    ui.label(shown.display().to_string());
-                                }
-                                None => {
-                                    ui.label("—");
-                                }
-                            }
-                            let text = self.status_text(&item.status);
-                            if item.status.is_blocking() {
-                                ui.colored_label(egui::Color32::LIGHT_RED, text);
-                            } else {
-                                ui.label(text);
-                            }
-                            ui.end_row();
-                        }
-                    });
-            });
-    }
-
-    fn subs_view(&mut self, ui: &mut egui::Ui) {
-        let l = self.lang();
-        if self.sub_rows.is_empty() {
-            ui.centered_and_justified(|ui| {
-                ui.label(egui::RichText::new(tr(l, "subs_hint")).size(20.0).weak());
-            });
-            return;
+        if dismiss {
+            self.notice = None;
         }
-        egui::ScrollArea::both()
-            .auto_shrink([false; 2])
-            .show(ui, |ui| {
-                egui::Grid::new("subs")
-                    .striped(true)
-                    .num_columns(4)
-                    .spacing([16.0, 6.0])
+        true
+    }
+
+    fn strip_visible(&self) -> bool {
+        self.busy.is_some()
+            || self.notice.is_some()
+            || self
+                .sub_rows
+                .iter()
+                .any(|r| matches!(r.state, SubState::Searching | SubState::Downloading))
+    }
+
+    /// Le opzioni galleggiano sopra la finestra, sotto il loro pulsante, così il resto non si sposta.
+    fn options_area(&mut self, ctx: &egui::Context) {
+        let l = self.lang();
+        egui::Area::new(egui::Id::NULL.with("options"))
+            .order(egui::Order::Foreground)
+            .anchor(egui::Align2::RIGHT_TOP, [-16.0, ui::TITLE_HEIGHT + 62.0])
+            .show(ctx, |ui| {
+                egui::Frame::new()
+                    .fill(ui::CARD)
+                    .stroke(Stroke::new(1.0, ui::LINE))
+                    .corner_radius(egui::CornerRadius::same(14))
+                    .inner_margin(Margin::same(18))
+                    .shadow(egui::Shadow {
+                        offset: [0, 6],
+                        blur: 24,
+                        spread: 0,
+                        color: egui::Color32::from_black_alpha(130),
+                    })
                     .show(ui, |ui| {
-                        for (i, r) in self.sub_rows.iter_mut().enumerate() {
-                            ui.checkbox(&mut r.include, "");
-                            ui.label(r.path.file_name().and_then(|n| n.to_str()).unwrap_or("?"));
-                            if r.candidates.is_empty() {
-                                ui.label("—");
-                            } else {
-                                egui::ComboBox::from_id_salt(("subcand", i))
-                                    .width(460.0)
-                                    .selected_text(r.candidates[r.selected].label())
+                        ui.set_width(520.0);
+                        ui::heading(ui, tr(l, "options"));
+                        ui.add_space(6.0);
+                        egui::Grid::new("opts")
+                            .num_columns(2)
+                            .min_col_width(150.0)
+                            .spacing([18.0, 10.0])
+                            .show(ui, |ui| {
+                                ui.label(muted(tr(l, "ui_lang")));
+                                egui::ComboBox::from_id_salt("uilang")
+                                    .width(220.0)
+                                    .selected_text(self.config.ui_lang.name())
                                     .show_ui(ui, |ui| {
-                                        for (k, c) in r.candidates.iter().enumerate() {
-                                            ui.selectable_value(&mut r.selected, k, c.label());
+                                        for lang in Lang::ALL {
+                                            ui.selectable_value(
+                                                &mut self.config.ui_lang,
+                                                lang,
+                                                lang.name(),
+                                            );
                                         }
                                     });
+                                ui.end_row();
+                                ui.label(muted(tr(l, "provider")));
+                                egui::ComboBox::from_id_salt("provider")
+                                    .width(220.0)
+                                    .selected_text(self.config.provider.name())
+                                    .show_ui(ui, |ui| {
+                                        for p in Provider::ALL {
+                                            ui.selectable_value(
+                                                &mut self.config.provider,
+                                                p,
+                                                p.name(),
+                                            );
+                                        }
+                                    });
+                                ui.end_row();
+                                ui.label(muted(tr(l, "meta_lang")));
+                                egui::ComboBox::from_id_salt("metalang")
+                                    .width(220.0)
+                                    .selected_text(match self.config.meta_lang.as_str() {
+                                        "en" => "English",
+                                        _ => "Italiano",
+                                    })
+                                    .show_ui(ui, |ui| {
+                                        ui.selectable_value(
+                                            &mut self.config.meta_lang,
+                                            "it".to_string(),
+                                            "Italiano",
+                                        );
+                                        ui.selectable_value(
+                                            &mut self.config.meta_lang,
+                                            "en".to_string(),
+                                            "English",
+                                        );
+                                    });
+                                ui.end_row();
+                                ui.label(muted(tr(l, "tmdb_key")));
+                                ui.vertical(|ui| {
+                                    ui.add(
+                                        egui::TextEdit::singleline(&mut self.config.tmdb_key)
+                                            .password(true)
+                                            .desired_width(300.0),
+                                    );
+                                    ui.label(muted(tr(l, "tmdb_help")).size(12.0));
+                                });
+                                ui.end_row();
+                            });
+                        ui.add_space(10.0);
+                        ui.separator();
+                        ui.add_space(4.0);
+                        ui.label(RichText::new(tr(l, "os_title")).strong());
+                        ui.label(muted(tr(l, "os_help")).size(12.0));
+                        ui.add_space(4.0);
+                        egui::Grid::new("opts_os")
+                            .num_columns(2)
+                            .min_col_width(150.0)
+                            .spacing([18.0, 10.0])
+                            .show(ui, |ui| {
+                                ui.label(muted(tr(l, "os_key")));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.config.os_api_key)
+                                        .password(true)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                                ui.label(muted(tr(l, "os_user")));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.config.os_username)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                                ui.label(muted(tr(l, "os_pass")));
+                                ui.add(
+                                    egui::TextEdit::singleline(&mut self.config.os_password)
+                                        .password(true)
+                                        .desired_width(300.0),
+                                );
+                                ui.end_row();
+                            });
+                        ui.add_space(14.0);
+                        ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                            if ui::button(ui, tr(l, "save"), Kind::Primary).clicked() {
+                                self.save_config();
+                                self.show_options = false;
                             }
-                            match &r.state {
-                                SubState::Searching => ui.label(tr(l, "searching")),
-                                SubState::Found => ui.label(tr(l, "sub_found")),
-                                SubState::NotFound => ui.label(tr(l, "sub_none")),
-                                SubState::Downloading => ui.label(tr(l, "sub_downloading")),
-                                SubState::Saved(p) => ui.label(format!(
-                                    "{}: {}",
-                                    tr(l, "sub_saved"),
-                                    p.file_name().and_then(|n| n.to_str()).unwrap_or("?")
-                                )),
-                                SubState::Failed(e) => {
-                                    ui.colored_label(egui::Color32::LIGHT_RED, e.localized(l))
-                                }
-                            };
-                            ui.end_row();
-                        }
+                            if ui::button(ui, tr(l, "close"), Kind::Soft).clicked() {
+                                self.show_options = false;
+                            }
+                        });
                     });
             });
     }
+}
+
+/// Errori che valgono per tutti i file (chiave, account, limite): si mostrano una volta sola.
+fn is_setup_error(e: &Error) -> bool {
+    matches!(
+        e,
+        Error::TmdbKeyMissing
+            | Error::TmdbKeyInvalid
+            | Error::OsKeyMissing
+            | Error::OsKeyInvalid
+            | Error::OsAccountMissing
+            | Error::OsLoginFailed
+            | Error::OsDailyLimit
+            | Error::Http(429)
+    )
 }
 
 fn is_video(p: &Path) -> bool {
@@ -1065,56 +1725,84 @@ fn is_video(p: &Path) -> bool {
 impl eframe::App for App {
     fn ui(&mut self, ui: &mut egui::Ui, _frame: &mut eframe::Frame) {
         let ctx = ui.ctx().clone();
-        if ctx.input(|i| i.viewport().close_requested()) {
-            self.save_config();
-        }
-        if self.busy.is_none() {
-            let dropped: Vec<PathBuf> = ctx.input(|i| {
-                i.raw
-                    .dropped_files
-                    .iter()
-                    .map(|f| f.path().to_path_buf())
-                    .collect()
-            });
-            for p in dropped {
-                self.add_path(&p);
-            }
-        }
+        self.accept_drops(&ctx);
+        self.shortcuts(&ctx);
         self.poll();
         self.refresh_plan();
         let l = self.lang();
+        let hovering = ctx.input(|i| !i.raw.hovered_files.is_empty());
 
-        egui::Panel::top("top").show(ui, |ui| self.top_bar(ui));
-
-        egui::Panel::left("settings")
-            .min_size(360.0)
+        egui::Panel::top("title")
+            .exact_size(ui::TITLE_HEIGHT)
+            .frame(egui::Frame::new().fill(ui::TITLE))
+            .show_separator_line(false)
             .show(ui, |ui| {
-                egui::ScrollArea::vertical().show(ui, |ui| {
-                    ui.add_space(6.0);
-                    self.formats_section(ui);
-                    ui.add_space(10.0);
-                    self.action_section(ui);
-                    ui.add_space(12.0);
-                    ui.separator();
-                    self.online_section(ui);
-                    ui.add_space(12.0);
-                    ui.separator();
-                    self.subs_section(ui);
-                    ui.add_space(12.0);
-                    self.settings_section(ui);
-                });
+                ui::title_bar(
+                    ui,
+                    "RenameBot",
+                    tr(l, "minimize"),
+                    tr(l, "maximize"),
+                    tr(l, "restore"),
+                )
             });
 
-        egui::CentralPanel::default().show(ui, |ui| {
-            if self.files.is_empty() {
-                ui.centered_and_justified(|ui| {
-                    ui.label(egui::RichText::new(tr(l, "drop_hint")).size(20.0).weak());
+        egui::Panel::top("bar")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui::PANEL)
+                    .inner_margin(Margin::symmetric(16, 12)),
+            )
+            .show(ui, |ui| self.top_bar(ui));
+
+        egui::Panel::bottom("actions")
+            .frame(
+                egui::Frame::new()
+                    .fill(ui::PANEL)
+                    .inner_margin(Margin::symmetric(16, 10)),
+            )
+            .show(ui, |ui| match self.view {
+                View::Rename => self.rename_bar(ui),
+                View::Subs => self.subs_bar(ui),
+            });
+
+        if self.strip_visible() {
+            egui::Panel::bottom("strip")
+                .frame(
+                    egui::Frame::new()
+                        .fill(ui::CARD)
+                        .inner_margin(Margin::symmetric(16, 10)),
+                )
+                .show(ui, |ui| {
+                    self.strip(ui);
                 });
-            } else if self.view == View::Subs {
-                self.subs_view(ui);
-            } else {
-                self.plan_view(ui);
-            }
-        });
+        }
+
+        egui::CentralPanel::default()
+            .frame(
+                egui::Frame::new()
+                    .fill(ui::BG)
+                    .inner_margin(Margin::same(16)),
+            )
+            .show(ui, |ui| {
+                self.tabs_row(ui);
+                ui.add_space(12.0);
+                if self.files.is_empty() {
+                    self.empty_card(ui, hovering);
+                } else if self.view == View::Subs {
+                    self.subs_page(ui);
+                } else {
+                    self.rename_page(ui);
+                }
+            });
+
+        if self.show_options {
+            self.options_area(&ctx);
+        }
+        ui::border(&ctx);
+        ui::resize_edges(&ctx);
+    }
+
+    fn on_exit(&mut self) {
+        self.save_config();
     }
 }
