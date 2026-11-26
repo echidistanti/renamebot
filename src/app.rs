@@ -704,6 +704,19 @@ impl App {
         }
     }
 
+    /// Ricomincia da capo con altri file: svuota l'elenco e tutto ciò che dipende da quei file.
+    /// Formati, maschera e opzioni restano, perché sono scelte e non dati dei file.
+    fn clear_all(&mut self) {
+        self.files.clear();
+        self.overrides.clear();
+        self.sub_rows.clear();
+        self.groups.clear();
+        self.plan.clear();
+        self.editing = None;
+        self.notice = None;
+        self.plan_key.clear();
+    }
+
     /// Dopo aver aggiunto file: con i dati online attivi la ricerca riparte (la cache la rende leggera).
     fn after_add(&mut self) {
         if self.online && !self.files.is_empty() {
@@ -812,11 +825,8 @@ impl App {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 if !self.files.is_empty() {
                     ui.add_enabled_ui(self.busy.is_none(), |ui| {
-                        if ui::button(ui, tr(l, "clear"), Kind::Ghost).clicked() {
-                            self.files.clear();
-                            self.overrides.clear();
-                            self.sub_rows.clear();
-                            self.groups.clear();
+                        if ui::button(ui, tr(l, "clear"), Kind::Soft).clicked() {
+                            self.clear_all();
                         }
                     });
                     ui.label(muted(format!(
@@ -1776,9 +1786,14 @@ impl App {
         }
         let Some(n) = &self.notice else { return false };
         let mut dismiss = false;
+        let mut clear = false;
         ui.horizontal(|ui| {
             ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
                 dismiss = ui::close(ui).on_hover_text(tr(l, "dismiss")).clicked();
+                // Finito un lavoro, il passo dopo è di solito ricominciare con altri file.
+                if !n.bad && !self.files.is_empty() {
+                    clear = ui::button(ui, tr(l, "clear"), Kind::Soft).clicked();
+                }
                 ui.with_layout(egui::Layout::left_to_right(egui::Align::Center), |ui| {
                     let (word, color) = if n.bad {
                         ("attention", ui::WARN)
@@ -1792,6 +1807,9 @@ impl App {
         });
         if dismiss {
             self.notice = None;
+        }
+        if clear {
+            self.clear_all();
         }
         true
     }
@@ -1860,6 +1878,11 @@ impl App {
                                         }
                                     });
                                 ui.end_row();
+                                if metadata::series_provider(&self.config) != self.config.provider {
+                                    ui.label("");
+                                    ui.label(muted(tr(l, "provider_fallback")).size(12.0));
+                                    ui.end_row();
+                                }
                                 ui.label(muted(tr(l, "meta_lang")));
                                 egui::ComboBox::from_id_salt("metalang")
                                     .width(220.0)

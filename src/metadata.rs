@@ -134,8 +134,16 @@ pub fn parse_tvmaze_episodes(body: &str) -> Result<Vec<Episode>, Error> {
 }
 
 /// Cerca serie con il provider scelto.
-pub fn search_series(f: &dyn Http, cfg: &Config, query: &str) -> Result<Vec<Candidate>, Error> {
+/// Database usato davvero per le serie: senza chiave TMDB si passa a TVmaze, che non la chiede.
+pub fn series_provider(cfg: &Config) -> Provider {
     match cfg.provider {
+        Provider::Tmdb if cfg.tmdb_key.trim().is_empty() => Provider::Tvmaze,
+        p => p,
+    }
+}
+
+pub fn search_series(f: &dyn Http, cfg: &Config, query: &str) -> Result<Vec<Candidate>, Error> {
+    match series_provider(cfg) {
         Provider::Tmdb => {
             let url = format!(
                 "https://api.themoviedb.org/3/search/tv?api_key={}&language={}&query={}",
@@ -387,19 +395,26 @@ mod tests {
     }
 
     #[test]
-    fn senza_chiave_tmdb_errore_chiaro_ma_tvmaze_funziona() {
+    fn senza_chiave_tmdb_le_serie_passano_a_tvmaze() {
         let f = Canned::new(&[(
             "https://api.tvmaze.com/search/shows?q=Twin%20Peaks",
             MAZE_SEARCH,
         )]);
-        let mut cfg = Config::default();
+        let cfg = Config::default();
+        assert_eq!(cfg.provider, Provider::Tmdb);
+        assert_eq!(series_provider(&cfg), Provider::Tvmaze);
+        let c = search_series(&f, &cfg, "Twin Peaks").unwrap();
+        assert_eq!((c.len(), c[0].provider), (2, Provider::Tvmaze));
+        // I film invece si cercano solo su TMDB: senza chiave l'errore resta e dice cosa fare.
         assert_eq!(
-            search_series(&f, &cfg, "Twin Peaks").unwrap_err(),
+            search_movies(&f, &cfg, "x").unwrap_err(),
             Error::TmdbKeyMissing
         );
-        assert!(search_movies(&f, &cfg, "x").is_err());
-        cfg.provider = Provider::Tvmaze;
-        assert_eq!(search_series(&f, &cfg, "Twin Peaks").unwrap().len(), 2);
+        let con_chiave = Config {
+            tmdb_key: "K".into(),
+            ..Default::default()
+        };
+        assert_eq!(series_provider(&con_chiave), Provider::Tmdb);
     }
 
     #[test]

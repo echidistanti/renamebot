@@ -229,6 +229,10 @@ pub fn tr(lang: Lang, key: &'static str) -> &'static str {
         "provider" => ("Database delle serie", "Series database"),
         "meta_lang" => ("Lingua dei titoli", "Title language"),
         "tmdb_key" => ("Chiave API TMDB", "TMDB API key"),
+        "provider_fallback" => (
+            "Senza chiave TMDB le serie si cercano su TVmaze.",
+            "Without a TMDB key, series are searched on TVmaze.",
+        ),
         "tmdb_help" => (
             "Gratuita, da themoviedb.org: Impostazioni → API.",
             "Free, from themoviedb.org: Settings → API.",
