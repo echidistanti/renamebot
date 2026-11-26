@@ -39,6 +39,52 @@ impl MediaInfo {
     }
 }
 
+/// I dati di un file come testo, per correggerli a mano.
+#[derive(Debug, Clone, Default, PartialEq)]
+pub struct Fields {
+    pub n: String,
+    pub y: String,
+    pub s: String,
+    pub e: String,
+    pub t: String,
+}
+
+impl Fields {
+    pub fn from_info(i: &MediaInfo) -> Self {
+        let num = |v: Option<u32>| v.map(|x| x.to_string()).unwrap_or_default();
+        Self {
+            n: i.n.clone().unwrap_or_default(),
+            y: num(i.y),
+            s: num(i.s),
+            e: num(i.e),
+            t: i.t.clone().unwrap_or_default(),
+        }
+    }
+
+    /// Un campo vuoto vuol dire "manca". In caso d'errore torna il nome del campo numerico non valido.
+    pub fn parse(&self) -> Result<MediaInfo, &'static str> {
+        let text = |v: &str| Some(v.trim().to_string()).filter(|x| !x.is_empty());
+        let num = |v: &str, name: &'static str, max: u32| -> Result<Option<u32>, &'static str> {
+            let v = v.trim();
+            if v.is_empty() {
+                return Ok(None);
+            }
+            v.parse::<u32>()
+                .ok()
+                .filter(|x| *x <= max)
+                .map(Some)
+                .ok_or(name)
+        };
+        Ok(MediaInfo {
+            n: text(&self.n),
+            y: num(&self.y, "y", 9999)?,
+            s: num(&self.s, "s", 999)?,
+            e: num(&self.e, "e", 9999)?,
+            t: text(&self.t),
+        })
+    }
+}
+
 pub const PLACEHOLDERS: &[&str] = &["n", "y", "s", "e", "t", "s00", "e00", "s00e00", "sxe"];
 
 #[derive(Debug, Clone, PartialEq)]
@@ -345,6 +391,53 @@ mod tests {
         assert_eq!(
             Template::parse("{}").unwrap_err(),
             TemplateError::EmptyExpression
+        );
+    }
+
+    #[test]
+    fn campi_scritti_a_mano() {
+        let f = Fields::from_info(&ep());
+        assert_eq!(
+            (f.y.as_str(), f.s.as_str(), f.e.as_str()),
+            ("1990", "2", "7")
+        );
+        assert_eq!(f.parse().unwrap(), ep());
+
+        let vuoti = Fields {
+            n: "  Solaris ".into(),
+            y: "1972".into(),
+            ..Default::default()
+        };
+        let i = vuoti.parse().unwrap();
+        assert_eq!(
+            (i.n.as_deref(), i.y, i.s, i.t.as_deref()),
+            (Some("Solaris"), Some(1972), None, None)
+        );
+        assert!(!i.is_episode());
+
+        assert_eq!(
+            Fields {
+                s: "due".into(),
+                ..Default::default()
+            }
+            .parse(),
+            Err("s")
+        );
+        assert_eq!(
+            Fields {
+                y: "19720".into(),
+                ..Default::default()
+            }
+            .parse(),
+            Err("y")
+        );
+        assert_eq!(
+            Fields {
+                e: "-1".into(),
+                ..Default::default()
+            }
+            .parse(),
+            Err("e")
         );
     }
 

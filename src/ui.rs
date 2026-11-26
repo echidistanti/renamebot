@@ -359,6 +359,7 @@ pub fn empty_icon(ui: &mut Ui, hot: bool) {
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Icon {
     Folder,
+    Pencil,
     Close,
     Minimize,
     Maximize,
@@ -394,6 +395,16 @@ pub fn draw_icon(p: &Painter, c: Pos2, icon: Icon, color: Color32) {
                 st(1.3),
             ));
         }
+        Icon::Pencil => {
+            // Corpo inclinato, punta in basso a sinistra, cappuccio in alto a destra.
+            p.line_segment([at(-5.0, 5.0), at(4.0, -4.0)], st(3.2));
+            p.line_segment([at(3.0, -7.0), at(7.0, -3.0)], st(1.6));
+            p.add(Shape::convex_polygon(
+                vec![at(-7.0, 7.0), at(-6.2, 3.6), at(-3.6, 6.2)],
+                color,
+                Stroke::NONE,
+            ));
+        }
         Icon::Folder => {
             p.add(Shape::closed_line(
                 vec![
@@ -410,16 +421,23 @@ pub fn draw_icon(p: &Painter, c: Pos2, icon: Icon, color: Color32) {
     }
 }
 
-/// Pulsante tondo con un'icona.
-pub fn icon_button(ui: &mut Ui, icon: Icon) -> Response {
-    let (rect, resp) = ui.allocate_exact_size(vec2(34.0, 34.0), Sense::click());
+/// Pulsante tondo con un'icona; `on` la colora d'accento (per esempio: dati corretti a mano).
+pub fn icon_button(ui: &mut Ui, icon: Icon, on: bool, size: f32) -> Response {
+    let (rect, resp) = ui.allocate_exact_size(vec2(size, size), Sense::click());
     if ui.is_rect_visible(rect) {
         let enabled = ui.is_enabled();
         let hot = resp.hovered() && enabled;
-        if hot {
-            ui.painter().circle_filled(rect.center(), 17.0, FIELD);
+        if on {
+            ui.painter()
+                .circle_filled(rect.center(), size / 2.0, ACCENT_DIM);
+        } else if hot {
+            ui.painter().circle_filled(rect.center(), size / 2.0, FIELD);
         }
-        let color = if hot { TEXT } else { MUTED };
+        let color = match (on, hot) {
+            (true, _) => ACCENT_TEXT,
+            (false, true) => TEXT,
+            _ => MUTED,
+        };
         draw_icon(
             ui.painter(),
             rect.center(),

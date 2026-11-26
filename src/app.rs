@@ -12,7 +12,8 @@ use renamebot::metadata::{self, Candidate, Episode, GroupSpec};
 use renamebot::ops::{self, Action, Batch, History, Report};
 use renamebot::plan::{Formats, PlanItem, Status, build_plan, info_from_name};
 use renamebot::subs::{self, Client, Session, SubCandidate};
-use renamebot::template::{MediaInfo, Template};
+use renamebot::template::{Fields, MediaInfo, Template};
+use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -128,6 +129,12 @@ struct Notice {
     bad: bool,
 }
 
+/// Il riquadro per correggere a mano i dati di un file.
+struct Editing {
+    path: PathBuf,
+    fields: Fields,
+}
+
 enum Busy {
     Applying(usize, usize),
     Undoing,
@@ -144,6 +151,9 @@ pub struct App {
     show_options: bool,
     /// Nome del preset da salvare, mentre lo si scrive.
     save_as: Option<String>,
+    /// Dati corretti a mano, per file: prendono il posto di quelli riconosciuti.
+    overrides: HashMap<PathBuf, MediaInfo>,
+    editing: Option<Editing>,
     action: Action,
     with_sidecars: bool,
     history: History,
@@ -186,6 +196,8 @@ impl App {
             format_error: None,
             show_options: false,
             save_as: None,
+            overrides: HashMap::new(),
+            editing: None,
             action: Action::Move,
             with_sidecars: true,
             history,
@@ -253,8 +265,12 @@ impl App {
         mask: Option<&Mask>,
         online: bool,
         groups: &[Group],
+        overrides: &HashMap<PathBuf, MediaInfo>,
         path: &Path,
     ) -> Option<MediaInfo> {
+        if let Some(fixed) = overrides.get(path) {
+            return Some(fixed.clone());
+        }
         let base = info_from_name(mask, path)?;
         if online
             && let Some(k) = metadata::group_key(&base)
@@ -311,7 +327,7 @@ impl App {
                         movie: &m,
                     },
                     dest.as_deref(),
-                    &|p| Self::resolve_info(mask.as_ref(), online, groups, p),
+                    &|p| Self::resolve_info(mask.as_ref(), online, groups, &self.overrides, p),
                 );
             }
             (e, m, k) => {
@@ -391,7 +407,8 @@ impl App {
         let mut jobs = Vec::new();
         self.sub_rows.clear();
         for f in &self.files {
-            let info = Self::resolve_info(mask.as_ref(), self.online, &self.groups, f);
+            let info =
+                Self::resolve_info(mask.as_ref(), self.online, &self.groups, &self.overrides, f);
             self.sub_rows.push(SubRow {
                 path: f.clone(),
                 state: SubState::Searching,
@@ -542,12 +559,23 @@ impl App {
                 r.path = p;
             }
         }
+        let moved: Vec<(PathBuf, PathBuf)> = self
+            .overrides
+            .keys()
+            .filter_map(|k| ops::path_after(batch, k, forward).map(|n| (k.clone(), n)))
+            .collect();
+        for (old, new) in moved {
+            if let Some(v) = self.overrides.remove(&old) {
+                self.overrides.insert(new, v);
+            }
+        }
         if !forward {
             for e in batch.entries.iter().filter(|e| e.action == Action::Move) {
                 self.add_path(&e.from);
             }
         }
         self.files.retain(|f| f.exists());
+        self.overrides.retain(|k, _| k.exists());
         self.sub_rows.retain(|r| r.path.exists());
         self.plan_key.clear();
     }
@@ -732,6 +760,7 @@ impl App {
         if esc {
             self.show_options = false;
             self.save_as = None;
+            self.editing = None;
         }
     }
 
@@ -785,6 +814,7 @@ impl App {
                     ui.add_enabled_ui(self.busy.is_none(), |ui| {
                         if ui::button(ui, tr(l, "clear"), Kind::Ghost).clicked() {
                             self.files.clear();
+                            self.overrides.clear();
                             self.sub_rows.clear();
                             self.groups.clear();
                         }
@@ -1055,22 +1085,195 @@ impl App {
         });
     }
 
-    fn status_look(&self, s: &Status) -> (String, egui::Color32, &'static str) {
+    /// Testo, colore, suggerimento completo e, per gli stati da rivedere, il rimedio in breve.
+    fn status_look(
+        &self,
+        s: &Status,
+    ) -> (String, egui::Color32, &'static str, Option<&'static str>) {
         let l = self.lang();
         match s {
-            Status::Ok => (tr(l, "st_ok").into(), ui::SUCCESS, "tip_ok"),
-            Status::Unchanged => (tr(l, "st_same").into(), ui::MUTED, "tip_same"),
-            Status::Exists => (tr(l, "st_exists").into(), ui::WARN, "tip_exists"),
-            Status::Duplicate => (tr(l, "st_dup").into(), ui::WARN, "tip_dup"),
-            Status::NoMatch => (tr(l, "st_nomatch").into(), ui::DANGER, "tip_nomatch"),
+            Status::Ok => (tr(l, "st_ok").into(), ui::SUCCESS, "tip_ok", None),
+            Status::Unchanged => (tr(l, "st_same").into(), ui::MUTED, "tip_same", None),
+            Status::Exists => (
+                tr(l, "st_exists").into(),
+                ui::WARN,
+                "tip_exists",
+                Some("fix_exists"),
+            ),
+            Status::Duplicate => (tr(l, "st_dup").into(), ui::WARN, "tip_dup", Some("fix_dup")),
+            Status::NoMatch => (
+                tr(l, "st_nomatch").into(),
+                ui::DANGER,
+                "tip_nomatch",
+                Some("fix_nomatch"),
+            ),
             Status::Missing(f) => {
                 let fields: Vec<String> = f.iter().map(|x| format!("{{{x}}}")).collect();
                 (
                     format!("{} {}", tr(l, "st_missing"), fields.join(" ")),
                     ui::DANGER,
                     "tip_missing",
+                    Some("fix_missing"),
                 )
             }
+        }
+    }
+
+    /// Apre il riquadro di correzione con i dati che il file ha adesso.
+    fn open_editor(&mut self, path: PathBuf) {
+        let mask = self.compile_mask().ok().flatten();
+        let info = Self::resolve_info(
+            mask.as_ref(),
+            self.online,
+            &self.groups,
+            &self.overrides,
+            &path,
+        )
+        .or_else(|| info_from_name(None, &path))
+        .unwrap_or_default();
+        self.editing = Some(Editing {
+            fields: Fields::from_info(&info),
+            path,
+        });
+    }
+
+    /// Riquadro per correggere a mano i dati di un file, con il nome che ne risulterà.
+    fn edit_modal(&mut self, ctx: &egui::Context) {
+        let l = self.lang();
+        let Some(ed) = &self.editing else { return };
+        let path = ed.path.clone();
+        let parsed = ed.fields.parse();
+        let had_override = self.overrides.contains_key(&path);
+        // Il nome che risulterà, con le stesse regole dell'anteprima.
+        let preview = parsed.as_ref().ok().and_then(|info| {
+            let e = Template::parse(&self.config.fmt_episode).ok()?;
+            let m = Template::parse(&self.config.fmt_movie).ok()?;
+            let dest = self.config.dest.trim();
+            let dest = (!dest.is_empty()).then(|| PathBuf::from(dest));
+            let item = build_plan(
+                std::slice::from_ref(&path),
+                &Formats {
+                    episode: &e,
+                    movie: &m,
+                },
+                dest.as_deref(),
+                &|_| Some(info.clone()),
+            )
+            .pop()?;
+            let shown = item.target.as_ref().map(|t| {
+                let base = item.source.parent();
+                base.and_then(|b| t.strip_prefix(b).ok())
+                    .unwrap_or(t)
+                    .display()
+                    .to_string()
+            });
+            Some((shown, item.status))
+        });
+        let preview_look = preview.as_ref().map(|(_, st)| self.status_look(st));
+        let name = path
+            .file_name()
+            .map(|n| n.to_string_lossy().into_owned())
+            .unwrap_or_default();
+
+        enum Choice {
+            Apply(MediaInfo),
+            Reset,
+            Cancel,
+        }
+        let mut choice = None;
+        let ed = self.editing.as_mut().expect("controllato sopra");
+        let resp = egui::Modal::new(egui::Id::NULL.with("edit"))
+            .frame(
+                egui::Frame::new()
+                    .fill(ui::CARD)
+                    .stroke(Stroke::new(1.0, ui::LINE))
+                    .corner_radius(egui::CornerRadius::same(14))
+                    .inner_margin(Margin::same(18)),
+            )
+            .show(ctx, |ui| {
+                ui.set_width(540.0);
+                ui::heading(ui, tr(l, "edit_title"));
+                ui.add(egui::Label::new(muted(&name)).truncate());
+                ui.add(egui::Label::new(muted(tr(l, "edit_help")).size(12.0)).wrap());
+                ui.add_space(8.0);
+                egui::Grid::new("edit_grid")
+                    .num_columns(2)
+                    .min_col_width(150.0)
+                    .spacing([18.0, 10.0])
+                    .show(ui, |ui| {
+                        for (key, field, width) in [
+                            ("f_n", &mut ed.fields.n, 340.0),
+                            ("f_y", &mut ed.fields.y, 90.0),
+                            ("f_s", &mut ed.fields.s, 90.0),
+                            ("f_e", &mut ed.fields.e, 90.0),
+                            ("f_t", &mut ed.fields.t, 340.0),
+                        ] {
+                            ui.label(muted(tr(l, key)));
+                            ui.add(egui::TextEdit::singleline(field).desired_width(width));
+                            ui.end_row();
+                        }
+                    });
+                if let Err(bad) = &parsed {
+                    let key = match *bad {
+                        "y" => "f_y",
+                        "s" => "f_s",
+                        _ => "f_e",
+                    };
+                    ui.label(
+                        RichText::new(format!("{}: {}", tr(l, key), tr(l, "f_invalid")))
+                            .size(13.0)
+                            .color(ui::DANGER),
+                    );
+                }
+                ui.add_space(8.0);
+                ui.separator();
+                ui.add_space(4.0);
+                ui.label(muted(tr(l, "f_result")));
+                if let (Some((shown, _)), Some((text, color, tip, _))) = (&preview, &preview_look) {
+                    ui.horizontal(|ui| {
+                        ui::chip(ui, text, *color).on_hover_text(tr(l, tip));
+                        ui.add(
+                            egui::Label::new(
+                                RichText::new(shown.clone().unwrap_or_else(|| "—".into()))
+                                    .size(14.0),
+                            )
+                            .truncate(),
+                        );
+                    });
+                }
+                ui.add_space(14.0);
+                ui.with_layout(egui::Layout::right_to_left(egui::Align::Center), |ui| {
+                    ui.add_enabled_ui(parsed.is_ok(), |ui| {
+                        if ui::button(ui, tr(l, "apply_edit"), Kind::Primary).clicked()
+                            && let Ok(info) = &parsed
+                        {
+                            choice = Some(Choice::Apply(info.clone()));
+                        }
+                    });
+                    if ui::button(ui, tr(l, "cancel"), Kind::Soft).clicked() {
+                        choice = Some(Choice::Cancel);
+                    }
+                    if had_override && ui::button(ui, tr(l, "reset"), Kind::Ghost).clicked() {
+                        choice = Some(Choice::Reset);
+                    }
+                });
+            });
+        if resp.should_close() && choice.is_none() {
+            choice = Some(Choice::Cancel);
+        }
+        match choice {
+            Some(Choice::Apply(info)) => {
+                self.overrides.insert(path, info);
+                self.editing = None;
+                self.revision += 1;
+            }
+            Some(Choice::Reset) => {
+                self.overrides.remove(&path);
+                self.editing = None;
+                self.revision += 1;
+            }
+            Some(Choice::Cancel) => self.editing = None,
+            None => {}
         }
     }
 
@@ -1086,6 +1289,7 @@ impl App {
             .count();
         let review = self.plan.len() - ready - same;
         let mut remove: Option<PathBuf> = None;
+        let mut edit: Option<PathBuf> = None;
         egui::Frame::new()
             .fill(ui::CARD)
             .stroke(Stroke::new(1.0, ui::LINE))
@@ -1137,39 +1341,72 @@ impl App {
                             if ui::close(&mut row).on_hover_text(tr(l, "remove")).clicked() {
                                 remove = Some(item.source.clone());
                             }
-                            let (text, color, tip) = self.status_look(&item.status);
+                            let manual = self.overrides.contains_key(&item.source);
+                            if ui::icon_button(&mut row, ui::Icon::Pencil, manual, 26.0)
+                                .on_hover_text(tr(l, "edit"))
+                                .clicked()
+                            {
+                                edit = Some(item.source.clone());
+                            }
+                            let (text, color, tip, fix) = self.status_look(&item.status);
                             ui::chip(&mut row, &text, color).on_hover_text(tr(l, tip));
                             row.add_space(8.0);
                             row.with_layout(egui::Layout::top_down(egui::Align::Min), |ui| {
                                 ui.spacing_mut().item_spacing.y = 2.0;
-                                let new = match &item.target {
-                                    Some(t) => {
-                                        let base = item.source.parent();
-                                        let shown =
-                                            base.and_then(|b| t.strip_prefix(b).ok()).unwrap_or(t);
-                                        RichText::new(shown.display().to_string())
-                                            .size(14.0)
-                                            .color(ui::TEXT)
-                                    }
-                                    None => RichText::new("—").color(ui::MUTED),
-                                };
-                                ui.add(egui::Label::new(new).truncate());
                                 let old = item
                                     .source
                                     .file_name()
                                     .map(|n| n.to_string_lossy().into_owned())
                                     .unwrap_or_default();
+                                // Senza nome nuovo la prima riga mostra quello attuale, così si sa di che file si parla.
+                                let (first, old_shown) = match &item.target {
+                                    Some(t) => {
+                                        let base = item.source.parent();
+                                        let shown =
+                                            base.and_then(|b| t.strip_prefix(b).ok()).unwrap_or(t);
+                                        (shown.display().to_string(), true)
+                                    }
+                                    None => (old.clone(), false),
+                                };
                                 ui.add(
                                     egui::Label::new(
-                                        muted(format!("{} {old}", tr(l, "from"))).size(12.5),
+                                        RichText::new(first).size(14.0).color(ui::TEXT),
                                     )
                                     .truncate(),
                                 );
+                                // La seconda riga dice da dove viene e, se serve, come rimediare: senza dover passare col mouse.
+                                let mut job = egui::text::LayoutJob::default();
+                                let small = |c: egui::Color32| egui::TextFormat {
+                                    font_id: egui::FontId::proportional(12.5),
+                                    color: c,
+                                    ..Default::default()
+                                };
+                                let mut parts: Vec<(String, egui::Color32)> = Vec::new();
+                                if old_shown {
+                                    parts.push((format!("{} {old}", tr(l, "from")), ui::MUTED));
+                                }
+                                if let Some(fix) = fix {
+                                    parts.push((tr(l, fix).to_string(), color));
+                                }
+                                if manual {
+                                    parts.push((tr(l, "manual").to_string(), ui::ACCENT_TEXT));
+                                }
+                                for (k, (t, c)) in parts.into_iter().enumerate() {
+                                    if k > 0 {
+                                        job.append(" · ", 0.0, small(ui::MUTED));
+                                    }
+                                    job.append(&t, 0.0, small(c));
+                                }
+                                ui.add(egui::Label::new(job).truncate());
                             });
                         }
                     });
             });
+        if let Some(p) = edit {
+            self.open_editor(p);
+        }
         if let Some(p) = remove {
+            self.overrides.remove(&p);
             self.files.retain(|f| *f != p);
             self.sub_rows.retain(|r| r.path != p);
             self.plan_key.clear();
@@ -1434,7 +1671,7 @@ impl App {
                         self.config.dest = p.display().to_string();
                     }
                 }
-                if ui::icon_button(ui, ui::Icon::Folder)
+                if ui::icon_button(ui, ui::Icon::Folder, false, 34.0)
                     .on_hover_text(tr(l, "dest_pick"))
                     .clicked()
                     && let Some(p) = rfd::FileDialog::new().pick_folder()
@@ -1798,6 +2035,7 @@ impl eframe::App for App {
         if self.show_options {
             self.options_area(&ctx);
         }
+        self.edit_modal(&ctx);
         ui::border(&ctx);
         ui::resize_edges(&ctx);
     }
