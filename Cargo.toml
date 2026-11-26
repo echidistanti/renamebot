@@ -1,6 +1,6 @@
 [package]
-name = "bobina"
-version = "0.1.0"
+name = "renamebot"
+version = "0.1.1"
 edition = "2024"
 
 [dependencies]

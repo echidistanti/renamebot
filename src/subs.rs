@@ -178,7 +178,7 @@ impl Client {
     }
 
     fn user_agent() -> String {
-        format!("Bobina v{}", env!("CARGO_PKG_VERSION"))
+        format!("RenameBot v{}", env!("CARGO_PKG_VERSION"))
     }
 
     /// Cerca per hash (se noto) e per nome; i risultati con hash coincidente vengono per primi.
@@ -432,7 +432,7 @@ mod tests {
             calls[0]
                 .2
                 .iter()
-                .any(|(k, v)| k == "User-Agent" && v.starts_with("Bobina v"))
+                .any(|(k, v)| k == "User-Agent" && v.starts_with("RenameBot v"))
         );
     }
 

@@ -38,7 +38,7 @@ impl Default for Ureq {
     fn default() -> Self {
         let agent: ureq::Agent = ureq::Agent::config_builder()
             .timeout_global(Some(Duration::from_secs(30)))
-            .user_agent(concat!("Bobina/", env!("CARGO_PKG_VERSION")))
+            .user_agent(concat!("RenameBot/", env!("CARGO_PKG_VERSION")))
             .build()
             .into();
         Self { agent }
@@ -93,7 +93,7 @@ impl<H: Http> Cached<H> {
 
     /// Cartella di cache predefinita dell'utente.
     pub fn default_dir() -> Option<PathBuf> {
-        dirs::cache_dir().map(|d| d.join("Bobina").join("http"))
+        dirs::cache_dir().map(|d| d.join("RenameBot").join("http"))
     }
 
     fn path_for(&self, url: &str) -> PathBuf {

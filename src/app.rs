@@ -1,17 +1,17 @@
 //! Finestra principale: elenco file, maschera, formati, anteprima della rinomina e sottotitoli.
 //! Il lavoro lento (rete, spostamenti di file) gira in thread separati che rispondono con `Msg`.
 
-use bobina::config::{Config, Preset, Provider, builtin_presets};
-use bobina::error::Error;
-use bobina::http::{Cached, Http, Ureq};
-use bobina::i18n::{Lang, tr};
-use bobina::mask::Mask;
-use bobina::metadata::{self, Candidate, Episode, GroupSpec};
-use bobina::ops::{self, Action, Batch, History, Report};
-use bobina::plan::{Formats, PlanItem, Status, build_plan, info_from_name};
-use bobina::subs::{self, Client, Session, SubCandidate};
-use bobina::template::{MediaInfo, Template};
 use eframe::egui;
+use renamebot::config::{Config, Preset, Provider, builtin_presets};
+use renamebot::error::Error;
+use renamebot::http::{Cached, Http, Ureq};
+use renamebot::i18n::{Lang, tr};
+use renamebot::mask::Mask;
+use renamebot::metadata::{self, Candidate, Episode, GroupSpec};
+use renamebot::ops::{self, Action, Batch, History, Report};
+use renamebot::plan::{Formats, PlanItem, Status, build_plan, info_from_name};
+use renamebot::subs::{self, Client, Session, SubCandidate};
+use renamebot::template::{MediaInfo, Template};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc::{Receiver, Sender, channel};
 use std::sync::{Arc, Mutex};
@@ -163,7 +163,7 @@ impl App {
         let config_path = Config::default_path();
         let config = config_path.as_deref().map(Config::load).unwrap_or_default();
         let cache_dir = Cached::<Ureq>::default_dir()
-            .unwrap_or_else(|| std::env::temp_dir().join("bobina-http"));
+            .unwrap_or_else(|| std::env::temp_dir().join("renamebot-http"));
         let week = Duration::from_secs(7 * 24 * 3600);
         let (tx, rx) = channel();
         Self {

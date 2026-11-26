@@ -8,6 +8,23 @@ use std::fs;
 use std::io;
 use std::path::{Path, PathBuf};
 
+/// Cartella dati dell'utente (impostazioni e registro).
+pub fn data_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|base| data_dir_in(&base))
+}
+
+/// Fino alla 0.1.0 il programma si chiamava Bobina: se c'è la sua cartella, con i nostri file,
+/// e quella nuova non esiste ancora, la si rinomina.
+fn data_dir_in(base: &Path) -> PathBuf {
+    let dir = base.join("RenameBot");
+    let old = base.join("Bobina");
+    let ours = old.join("config.json").exists() || old.join("history.json").exists();
+    if !dir.exists() && ours {
+        let _ = fs::rename(&old, &dir);
+    }
+    dir
+}
+
 /// Coppia di formati con un nome: quelli integrati più quelli salvati dall'utente.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Preset {
@@ -99,7 +116,7 @@ impl Default for Config {
 
 impl Config {
     pub fn default_path() -> Option<PathBuf> {
-        dirs::data_dir().map(|d| d.join("Bobina").join("config.json"))
+        data_dir().map(|d| d.join("config.json"))
     }
 
     pub fn load(path: &Path) -> Self {
@@ -163,6 +180,22 @@ mod tests {
             "formato mancante: quello di Plex"
         );
         assert_eq!(Config::load(&d.path().join("no.json")), Config::default());
+    }
+
+    #[test]
+    fn la_cartella_di_bobina_diventa_quella_di_renamebot() {
+        let d = tempfile::tempdir().unwrap();
+        let old = d.path().join("Bobina");
+        fs::create_dir_all(&old).unwrap();
+        fs::write(old.join("history.json"), "{}").unwrap();
+        let dir = data_dir_in(d.path());
+        assert!(dir.join("history.json").exists() && !old.exists());
+
+        // Una cartella Bobina senza i nostri file non è nostra: resta dov'è.
+        let d = tempfile::tempdir().unwrap();
+        fs::create_dir_all(d.path().join("Bobina/altro")).unwrap();
+        data_dir_in(d.path());
+        assert!(d.path().join("Bobina/altro").exists());
     }
 
     #[test]

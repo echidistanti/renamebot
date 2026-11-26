@@ -267,7 +267,7 @@ pub struct History {
 impl History {
     /// Percorso predefinito del registro nella cartella dati dell'utente.
     pub fn default_path() -> Option<PathBuf> {
-        dirs::data_dir().map(|d| d.join("Bobina").join("history.json"))
+        crate::config::data_dir().map(|d| d.join("history.json"))
     }
 
     pub fn load(path: &Path) -> Self {

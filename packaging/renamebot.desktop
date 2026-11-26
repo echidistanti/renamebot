@@ -1,8 +1,8 @@
 [Desktop Entry]
 Type=Application
-Name=Bobina
+Name=RenameBot
 Comment=Rinomina film e serie TV
-Exec=bobina
-Icon=bobina
+Exec=renamebot
+Icon=renamebot
 Categories=AudioVideo;Utility;
 Terminal=false

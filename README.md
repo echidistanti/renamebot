@@ -1,4 +1,6 @@
-# Bobina
+# RenameBot
+
+*Fino alla versione 0.1.0 si chiamava Bobina.*
 
 Rinominatore di film e serie TV con anteprima, scritto in Rust con GUI nativa (egui).
 Windows e Linux subito, macOS in seguito. Riscrittura indipendente, ispirata al comportamento di FileBot Pro.
