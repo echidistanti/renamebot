@@ -1,11 +1,9 @@
 # Crea una release in bozza con installer e zip per Windows e AppImage per Linux.
-# Si avvia con un tag vX.Y.Z oppure a mano da Actions indicando la versione;
-# nel secondo caso il tag nasce quando si pubblica la bozza.
+# Si avvia a mano da Actions indicando la versione; il tag nasce quando si pubblica la bozza.
+# Niente avvio sui tag: pubblicare creerebbe il tag e farebbe ripartire il flusso sulla release già pubblica.
 name: Release
 
 on:
-  push:
-    tags: ["v*"]
   workflow_dispatch:
     inputs:
       version:
@@ -13,7 +11,7 @@ on:
         required: true
 
 env:
-  TAG: ${{ inputs.version && format('v{0}', inputs.version) || github.ref_name }}
+  TAG: v${{ inputs.version }}
 
 permissions:
   contents: write
